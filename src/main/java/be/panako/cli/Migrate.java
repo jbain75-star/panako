@@ -42,6 +42,7 @@ class Migrate extends Application {
 		boolean restart = false;
 		long batchSize = PanakoStorageMigration.DEFAULT_BATCH_SIZE;
 		int sampleSize = 1000;
+		float minimumDuration = 0;
 
 		for (String argument : args) {
 			if (argument.equals("--verify")) {
@@ -54,6 +55,8 @@ class Migrate extends Application {
 				batchSize = Long.parseLong(argument.substring("--batch=".length()));
 			} else if (argument.startsWith("--sample=")) {
 				sampleSize = Integer.parseInt(argument.substring("--sample=".length()));
+			} else if (argument.startsWith("--min-duration=")) {
+				minimumDuration = Float.parseFloat(argument.substring("--min-duration=".length()));
 			} else {
 				System.err.println("Unknown argument '" + argument + "'");
 				printHelp();
@@ -63,7 +66,7 @@ class Migrate extends Application {
 
 		PanakoStorageKV lmdb = PanakoStorageKV.getInstance();
 		PanakoStoragePostgres postgres = PanakoStoragePostgres.getInstance();
-		PanakoStorageMigration migration = new PanakoStorageMigration(lmdb, postgres, batchSize);
+		PanakoStorageMigration migration = new PanakoStorageMigration(lmdb, postgres, batchSize, minimumDuration);
 
 		if (restart) {
 			migration.restart();
@@ -87,12 +90,14 @@ class Migrate extends Application {
 	public String description() {
 		return "Copies the fingerprints in the LMDB store into the PostgreSQL store.\n"
 				+ "\tThe LMDB store is only read and stays usable throughout. The copy can be\n"
-				+ "\tinterrupted and resumes where it stopped.";
+				+ "\tinterrupted and resumes where it stopped.\n"
+				+ "\t--min-duration leaves the prints of files shorter than that many seconds\n"
+				+ "\tbehind, and lists them in panako_migration_short_resource instead.";
 	}
 
 	@Override
 	public String synopsis() {
-		return "migrate [--verify] [--no-verify] [--restart] [--batch=500000] [--sample=1000]";
+		return "migrate [--verify] [--no-verify] [--restart] [--batch=500000] [--sample=1000] [--min-duration=0]";
 	}
 
 	@Override

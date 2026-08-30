@@ -31,7 +31,12 @@ Changed by AudioScout, 2026:
   interrupted run resumes from it and repeats only the batch that was in
   flight. `--verify` compares the number of audio files, the number of
   fingerprints, all meta-data and a sample of individual fingerprints spread
-  over the hash space.
+  over the hash space. `--min-duration=SECONDS` leaves the prints of files
+  shorter than that behind - a print of thirty seconds of a six minute record
+  only matches while those thirty seconds play - and lists them in
+  `panako_migration_short_resource` instead, as the files worth fetching in
+  full. A duration of zero is unknown rather than short, so such a file is
+  copied.
 - **Configuration arguments split on the first `=` only** (`be.panako.cli.Panako`),
   so a value containing one — a JDBC url with query parameters — is no longer
   truncated.

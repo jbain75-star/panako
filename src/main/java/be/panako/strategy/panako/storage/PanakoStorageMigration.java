@@ -31,7 +31,9 @@ import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Statement;
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Set;
 import java.util.logging.Logger;
 
 import org.lmdbjava.Cursor;
@@ -75,6 +77,14 @@ import org.postgresql.copy.CopyManager;
  * Nothing is written to or deleted from LMDB. The old store stays complete and
  * serving until someone decides otherwise.
  * </p>
+ *
+ * <p>
+ * A minimum duration leaves the prints of files shorter than it behind: a print
+ * of thirty seconds of a six minute record only matches while those thirty
+ * seconds play, so it is close to dead weight in the new store. The files it
+ * skips are written to {@code panako_migration_short_resource} instead, as the
+ * list of what is worth fetching in full.
+ * </p>
  */
 public class PanakoStorageMigration {
 
@@ -91,16 +101,24 @@ public class PanakoStorageMigration {
 	private final PanakoStorageKV source;
 	private final PanakoStoragePostgres target;
 	private final long batchSize;
+	private final float minimumDuration;
+
+	/** Resource identifiers left behind, empty when nothing is left behind. */
+	private Set<Integer> skipped = new HashSet<Integer>();
 
 	/**
 	 * @param source   the LMDB store to read.
 	 * @param target   the PostgreSQL store to fill.
 	 * @param batchSize the number of fingerprints per commit.
+	 * @param minimumDuration the number of seconds a file has to last to be
+	 *                        copied; zero copies everything.
 	 */
-	public PanakoStorageMigration(PanakoStorageKV source, PanakoStoragePostgres target, long batchSize) {
+	public PanakoStorageMigration(PanakoStorageKV source, PanakoStoragePostgres target, long batchSize,
+			float minimumDuration) {
 		this.source = source;
 		this.target = target;
 		this.batchSize = batchSize < 1 ? DEFAULT_BATCH_SIZE : batchSize;
+		this.minimumDuration = minimumDuration;
 	}
 
 	/**
@@ -109,6 +127,7 @@ public class PanakoStorageMigration {
 	public void migrate() {
 		Connection connection = target.migrationConnection();
 		createProgressTable(connection);
+		recordShortResources(connection);
 		long resources = copyMetadata(connection);
 		System.out.printf("> Copied meta-data of %d audio files\n", resources);
 		copyFingerprints(connection);
@@ -138,6 +157,7 @@ public class PanakoStorageMigration {
 	 */
 	public boolean verify(int sampleSize) {
 		Connection connection = target.migrationConnection();
+		findShortResources();
 
 		long lmdbFingerprints;
 		long lmdbResources;
@@ -151,13 +171,22 @@ public class PanakoStorageMigration {
 		long pgFingerprints = count(connection, "SELECT count(*) FROM panako_fingerprint");
 		long pgResources = count(connection, "SELECT count(*) FROM panako_resource");
 
-		System.out.printf("> audio files:   lmdb %d, postgres %d\n", lmdbResources, pgResources);
-		System.out.printf("> fingerprints:  lmdb %d, postgres %d\n", lmdbFingerprints, pgFingerprints);
+		// What is deliberately left behind is not a difference between the stores, so
+		// it comes off the numbers the two are held to.
+		long expectedResources = lmdbResources - skipped.size();
+		long expectedFingerprints = lmdbFingerprints - countSkippedEntries();
+
+		System.out.printf("> audio files:   lmdb %d, postgres %d\n", expectedResources, pgResources);
+		System.out.printf("> fingerprints:  lmdb %d, postgres %d\n", expectedFingerprints, pgFingerprints);
+		if (!skipped.isEmpty()) {
+			System.out.printf("> left behind:   %d audio files shorter than %.0f seconds\n",
+					skipped.size(), minimumDuration);
+		}
 
 		// Meta-data is what turns a match into a file name, so every row of it is
 		// compared rather than sampled: there are as many as there are audio files.
 		int metadataDifferences = compareMetadata(connection);
-		System.out.printf("> meta-data:     %d of %d audio files differ\n", metadataDifferences, lmdbResources);
+		System.out.printf("> meta-data:     %d of %d audio files differ\n", metadataDifferences, expectedResources);
 
 		int checked = 0;
 		int missing = 0;
@@ -179,6 +208,8 @@ public class PanakoStorageMigration {
 					int resourceID = value.getInt();
 					int t = value.getInt();
 					int f = value.getInt();
+					if (skipped.contains(resourceID))
+						continue;
 					statement.setLong(1, hash);
 					statement.setInt(2, resourceID);
 					statement.setInt(3, t);
@@ -202,10 +233,88 @@ public class PanakoStorageMigration {
 			System.out.printf("> sampled:       %d fingerprints, %d missing\n", checked, missing);
 		}
 
-		boolean equal = lmdbResources == pgResources && lmdbFingerprints <= pgFingerprints && missing == 0
+		boolean equal = expectedResources == pgResources && expectedFingerprints <= pgFingerprints && missing == 0
 				&& metadataDifferences == 0;
 		System.out.println(equal ? "> the stores agree" : "> the stores DO NOT agree");
 		return equal;
+	}
+
+	/**
+	 * The number of fingerprints in LMDB that belong to a file left behind, counted
+	 * rather than taken from the meta-data: the meta-data records how many prints
+	 * were extracted, which is not the same as how many entries they occupy once
+	 * identical ones have collapsed.
+	 */
+	private long countSkippedEntries() {
+		if (skipped.isEmpty())
+			return 0;
+		long entries = 0;
+		try (Txn<ByteBuffer> txn = source.env.txnRead();
+				CursorIterable<ByteBuffer> iterable = source.fingerprints.iterate(txn)) {
+			for (KeyVal<ByteBuffer> keyVal : iterable) {
+				if (skipped.contains(keyVal.val().getInt())) {
+					entries++;
+				}
+			}
+		}
+		return entries;
+	}
+
+	/**
+	 * Fill {@link #skipped} with the files that last less than the minimum
+	 * duration. A duration of zero or less is unknown rather than short, so such a
+	 * file is copied: leaving it behind on a number that was never measured would
+	 * throw away a full print.
+	 */
+	private void findShortResources() {
+		skipped = new HashSet<Integer>();
+		if (minimumDuration <= 0)
+			return;
+		for (Object[] row : readMetadata()) {
+			float duration = ((Float) row[2]).floatValue();
+			if (duration > 0 && duration < minimumDuration) {
+				skipped.add(Integer.valueOf(((Long) row[0]).intValue()));
+			}
+		}
+	}
+
+	/**
+	 * Write the files that are left behind to their own table, so whoever fetches
+	 * audio can be handed the list rather than having to guess at it.
+	 */
+	private void recordShortResources(Connection connection) {
+		findShortResources();
+		try (Statement statement = connection.createStatement()) {
+			statement.execute("CREATE TABLE IF NOT EXISTS panako_migration_short_resource ("
+					+ "resource_id bigint PRIMARY KEY,"
+					+ "path text NOT NULL,"
+					+ "duration real NOT NULL,"
+					+ "fingerprints integer NOT NULL)");
+		} catch (SQLException e) {
+			throw new RuntimeException("Could not create the table of short audio files", e);
+		}
+		if (skipped.isEmpty())
+			return;
+
+		String sql = "INSERT INTO panako_migration_short_resource (resource_id,path,duration,fingerprints) "
+				+ "VALUES (?,?,?,?) ON CONFLICT (resource_id) DO UPDATE SET path = EXCLUDED.path, "
+				+ "duration = EXCLUDED.duration, fingerprints = EXCLUDED.fingerprints";
+		try (PreparedStatement statement = connection.prepareStatement(sql)) {
+			for (Object[] row : readMetadata()) {
+				if (!skipped.contains(Integer.valueOf(((Long) row[0]).intValue())))
+					continue;
+				statement.setLong(1, (Long) row[0]);
+				statement.setString(2, (String) row[1]);
+				statement.setFloat(3, (Float) row[2]);
+				statement.setInt(4, (Integer) row[3]);
+				statement.addBatch();
+			}
+			statement.executeBatch();
+		} catch (SQLException e) {
+			throw new RuntimeException("Could not record the short audio files", e);
+		}
+		System.out.printf("> %d audio files last less than %.0f seconds: left behind, listed to fetch in full\n",
+				skipped.size(), minimumDuration);
 	}
 
 	private void copyFingerprints(Connection connection) {
@@ -220,7 +329,7 @@ public class PanakoStorageMigration {
 		long start = System.currentTimeMillis();
 		while (true) {
 			Batch batch = readBatch(resumeAt);
-			if (batch.rows == 0) {
+			if (batch.lastHash == null) {
 				break;
 			}
 			writeBatch(connection, batch);
@@ -259,18 +368,30 @@ public class PanakoStorageMigration {
 
 			boolean haveHash = false;
 			long previousHash = 0;
+			// Entries read rather than rows kept: a batch of nothing but skipped files
+			// still has to end, or one read transaction would cover the whole store.
+			long scanned = 0;
 			while (positioned) {
 				long hash = cursor.key().order(ByteOrder.LITTLE_ENDIAN).getLong();
 				// A batch ends where a hash ends. All the fingerprints of one hash sit
 				// together, so stopping between two of them would need a finer resume
 				// point than a hash; stopping after the last one does not.
-				if (haveHash && hash != previousHash && batch.rows >= batchSize) {
+				if (haveHash && hash != previousHash && scanned >= batchSize) {
 					break;
 				}
+				scanned++;
 				ByteBuffer value = cursor.val();
 				int resourceID = value.getInt();
 				int t = value.getInt();
 				int f = value.getInt();
+				if (skipped.contains(resourceID)) {
+					// Still a hash that was read, so the batch may end here: the resume
+					// point is a hash, not a row.
+					previousHash = hash;
+					haveHash = true;
+					positioned = cursor.seek(SeekOp.MDB_NEXT);
+					continue;
+				}
 
 				rows.append(hash).append('\t').append(resourceID).append('\t')
 						.append(t).append('\t').append(f).append('\n');
@@ -339,7 +460,12 @@ public class PanakoStorageMigration {
 	 * date.
 	 */
 	private long copyMetadata(Connection connection) {
-		List<Object[]> rows = readMetadata();
+		List<Object[]> rows = new ArrayList<Object[]>();
+		for (Object[] row : readMetadata()) {
+			if (!skipped.contains(Integer.valueOf(((Long) row[0]).intValue()))) {
+				rows.add(row);
+			}
+		}
 
 		String sql = "INSERT INTO panako_resource (resource_id,path,duration,fingerprints) VALUES (?,?,?,?) "
 				+ "ON CONFLICT (resource_id) DO UPDATE SET path = EXCLUDED.path, "
@@ -405,6 +531,8 @@ public class PanakoStorageMigration {
 		try (PreparedStatement statement = connection.prepareStatement(
 				"SELECT path,duration,fingerprints FROM panako_resource WHERE resource_id = ?")) {
 			for (Object[] row : readMetadata()) {
+				if (skipped.contains(Integer.valueOf(((Long) row[0]).intValue())))
+					continue;
 				statement.setLong(1, (Long) row[0]);
 				try (ResultSet result = statement.executeQuery()) {
 					boolean same = result.next()
