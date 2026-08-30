@@ -21,6 +21,17 @@ Changed by AudioScout, 2026:
   Fingerprints are unique per `(hash, resource_id, t, f)` and inserted with `ON
   CONFLICT DO NOTHING`, so storing the same audio again cannot double its
   fingerprints.
+- **A `migrate` command** (`be.panako.cli.Migrate`,
+  `PanakoStorageMigration`) that copies an existing LMDB store into the
+  PostgreSQL one. The fingerprints in LMDB are the full prints of every stored
+  file, so they are moved as data rather than extracted from audio again. LMDB
+  is only read, one bounded batch per read transaction, so no reader is long
+  lived enough to pin its free list while the store stays in use. Each batch
+  ends on a hash boundary and commits its rows together with that hash, so an
+  interrupted run resumes from it and repeats only the batch that was in
+  flight. `--verify` compares the number of audio files, the number of
+  fingerprints, all meta-data and a sample of individual fingerprints spread
+  over the hash space.
 - **Configuration arguments split on the first `=` only** (`be.panako.cli.Panako`),
   so a value containing one — a JDBC url with query parameters — is no longer
   truncated.
