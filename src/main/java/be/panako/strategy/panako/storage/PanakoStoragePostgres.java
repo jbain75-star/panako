@@ -169,6 +169,18 @@ public class PanakoStoragePostgres implements PanakoStorage {
 		return connections.get();
 	}
 
+	/**
+	 * The connection of the calling thread, for the migration in this package. It
+	 * needs the raw connection to copy rows in bulk and to keep a batch and its
+	 * resume point in one transaction, neither of which the storage interface
+	 * expresses.
+	 *
+	 * @return the connection of the current thread.
+	 */
+	Connection migrationConnection() {
+		return connection();
+	}
+
 	private void createSchemaIfNeeded() {
 		int partitions = Config.getInt(Key.PANAKO_PG_PARTITIONS);
 		if (partitions < 1) {
