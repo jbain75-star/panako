@@ -124,7 +124,7 @@ public class Delete extends Application {
 			hasResource =  strategy.hasResource(file.getAbsolutePath());
 
 			String message=null;
-			if(hasResource){
+			if(!hasResource){
 				message = String.format("%d/%d;%s;%s;%s",taskID,totalTasks,file.getName(),StopWatch.toTime("", 0),"Deletion skipped: resource not in the key value store;");
 			}else{
 				double durationInSeconds = strategy.delete(file.getAbsolutePath());

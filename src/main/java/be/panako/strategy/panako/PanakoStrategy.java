@@ -90,6 +90,8 @@ public class PanakoStrategy extends Strategy {
 		PanakoStorage db;
 		if (Config.get(Key.PANAKO_STORAGE).equalsIgnoreCase("LMDB")) {
 			db = PanakoStorageKV.getInstance();
+		}else if (Config.get(Key.PANAKO_STORAGE).equalsIgnoreCase("PG")) {
+			db = PanakoStoragePostgres.getInstance();
 		}else if (Config.get(Key.PANAKO_STORAGE).equalsIgnoreCase("FILE")) {
 			db = PanakoStorageFile.getInstance();
 		}else {
