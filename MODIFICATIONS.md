@@ -46,3 +46,9 @@ Changed by AudioScout, 2026:
 - **`PanakoStorageKV.processDeleteQueue` read the store queue** instead of the
   delete queue, so queued deletions were dropped.
 - `org.postgresql:postgresql` added to the Gradle dependencies.
+- **The test dataset is an assumption rather than a requirement**
+  (`be.panako.tests.TestData`): every test in the suite needs audio downloaded
+  from `panako.be`, and a machine with no route to that host reported five
+  failures that say nothing about the engine. A file that cannot be fetched now
+  aborts the tests that need it as undecided, so the suite is honest on a
+  build machine without the dataset and unchanged on one with it.

@@ -16,6 +16,8 @@ import java.util.List;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
+import org.junit.jupiter.api.Assumptions;
+
 public class TestData {
 
     private static final String DATASET_URL = "https://panako.be/releases/Panako-test-dataset/";
@@ -111,16 +113,26 @@ public class TestData {
 
     private static List<File> downloadDataset(String filenames[] , String foldername){
         List<File> files = new ArrayList<>();
+        List<String> missing = new ArrayList<>();
         for(String f : filenames) {
             String path = FileUtils.combine(FileUtils.temporaryDirectory(),f);
 
             if(cacheDownloadedFile(DATASET_URL + foldername + "/" + f , path))
                 System.out.println("Successfully download " + f);
-            else
+            else{
                 System.err.println("Failed to download " + f);
+                missing.add(f);
+            }
 
             files.add(new File(path));
         }
+
+        // Without the audio there is nothing to assert about, so a test that
+        // needs it is undecided rather than failed: a build machine with no
+        // route to the dataset host would otherwise report a broken engine.
+        Assumptions.assumeTrue(missing.isEmpty(),
+                "the test dataset is unreachable at " + DATASET_URL + ", missing " + missing.size()
+                        + " of " + filenames.length + " " + foldername + " files");
 
         return files;
 
