@@ -119,11 +119,28 @@ public class PanakoStoragePostgres implements PanakoStorage {
 		createSchemaIfNeeded();
 	}
 
+	/**
+	 * Configuration that may hold a secret is also accepted from the environment,
+	 * so a caller does not have to put a database password on a command line
+	 * where every other process on the machine can read it.
+	 *
+	 * @param key the configuration key
+	 * @return the configured value, or the environment variable of the same name
+	 *         when the configured value is empty.
+	 */
+	private String configOrEnvironment(Key key) {
+		String value = Config.get(key);
+		if (value != null && !value.isEmpty())
+			return value;
+		String fromEnvironment = System.getenv(key.name());
+		return fromEnvironment == null ? "" : fromEnvironment;
+	}
+
 	private Connection connect() {
-		String url = Config.get(Key.PANAKO_PG_URL);
+		String url = configOrEnvironment(Key.PANAKO_PG_URL);
 		Properties properties = new Properties();
-		String user = Config.get(Key.PANAKO_PG_USER);
-		String password = Config.get(Key.PANAKO_PG_PASSWORD);
+		String user = configOrEnvironment(Key.PANAKO_PG_USER);
+		String password = configOrEnvironment(Key.PANAKO_PG_PASSWORD);
 		if (!user.isEmpty()) {
 			properties.setProperty("user", user);
 		}
