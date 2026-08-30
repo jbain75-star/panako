@@ -15,7 +15,15 @@ Changed by AudioScout, 2026:
   configuration keys: `PANAKO_PG_URL`, `PANAKO_PG_USER`, `PANAKO_PG_PASSWORD`,
   `PANAKO_PG_PARTITIONS`, `PANAKO_PG_BATCH_SIZE`. The url, user and password
   are also read from environment variables of the same name, so a password need
-  not be passed on a command line.
+  not be passed on a command line; an environment variable that is set wins
+  over the configuration file, since `PANAKO_PG_URL` has a built-in default
+  (a database on localhost) that would otherwise silently take precedence.
+  Fingerprints are unique per `(hash, resource_id, t, f)` and inserted with `ON
+  CONFLICT DO NOTHING`, so storing the same audio again cannot double its
+  fingerprints.
+- **Configuration arguments split on the first `=` only** (`be.panako.cli.Panako`),
+  so a value containing one — a JDBC url with query parameters — is no longer
+  truncated.
 - **The `delete` command guard was inverted** (`be.panako.cli.Delete`):
   deletion was skipped exactly when the resource *was* present in the store,
   and attempted when it was not, so nothing was ever deleted.

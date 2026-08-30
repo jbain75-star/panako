@@ -255,9 +255,11 @@ public class Panako {
 		for(String argument:arguments){
 			//if the argument contains a = and the first part corresponds to 
 			//a value in the hashset
-			if(argument.contains("=") && keys.contains(argument.split("=")[0])){
-				String configurationKey = argument.split("=")[0];
-				String configurationValue = argument.split("=")[1];
+			// Split on the FIRST '=' only: a configuration value can legitimately
+			// contain one, as a JDBC url with query parameters does.
+			if(argument.contains("=") && keys.contains(argument.split("=",2)[0])){
+				String configurationKey = argument.split("=",2)[0];
+				String configurationValue = argument.split("=",2)[1];
 				Config.set(Key.valueOf(configurationKey),configurationValue);
 			}else{
 				//normal argument

@@ -124,16 +124,22 @@ public class PanakoStoragePostgres implements PanakoStorage {
 	 * so a caller does not have to put a database password on a command line
 	 * where every other process on the machine can read it.
 	 *
+	 * The environment wins over the configuration: several of these keys have a
+	 * built-in default — the url defaults to a database on localhost — and a
+	 * default is not a decision anyone made. A caller that sets the variable
+	 * means it, and would otherwise be connected to a database it never asked
+	 * for. An explicit argument still wins, as it is not passed through here.
+	 *
 	 * @param key the configuration key
-	 * @return the configured value, or the environment variable of the same name
-	 *         when the configured value is empty.
+	 * @return the environment variable of the same name when it is set and not
+	 *         empty, otherwise the configured value.
 	 */
 	private String configOrEnvironment(Key key) {
-		String value = Config.get(key);
-		if (value != null && !value.isEmpty())
-			return value;
 		String fromEnvironment = System.getenv(key.name());
-		return fromEnvironment == null ? "" : fromEnvironment;
+		if (fromEnvironment != null && !fromEnvironment.isEmpty())
+			return fromEnvironment;
+		String value = Config.get(key);
+		return value == null ? "" : value;
 	}
 
 	private Connection connect() {
@@ -192,8 +198,13 @@ public class PanakoStoragePostgres implements PanakoStorage {
 						"CREATE TABLE IF NOT EXISTS %s PARTITION OF panako_fingerprint "
 						+ "FOR VALUES FROM (%s) TO (%s)",
 						name, i == 0 ? "MINVALUE" : Long.toString(from), to));
+				// Unique, so that storing the same audio twice cannot double its
+				// fingerprints: an identical print for the same resource conflicts and is
+				// dropped (see processStoreQueue). Leading on hash, and covering every
+				// column, it also answers a query on its own — the same shape the plain
+				// covering index had.
 				statement.execute(String.format(
-						"CREATE INDEX IF NOT EXISTS %s_hash_idx ON %s (hash) INCLUDE (resource_id,t,f)",
+						"CREATE UNIQUE INDEX IF NOT EXISTS %s_hash_idx ON %s (hash,resource_id,t,f)",
 						name, name));
 			}
 			LOG.info(String.format("PostgreSQL fingerprint store ready with %d hash partitions", partitions));
@@ -281,7 +292,12 @@ public class PanakoStoragePostgres implements PanakoStorage {
 		if (queue == null)
 			return;
 
-		String sql = "INSERT INTO panako_fingerprint (hash,resource_id,t,f) VALUES (?,?,?,?)";
+		// DO NOTHING rather than plain INSERT: storing audio that is already in the
+		// store is a normal thing to ask for — a re-print of the same file, a repair
+		// pass — and it must leave the store the size it was, not twice the size with
+		// every hit counted twice.
+		String sql = "INSERT INTO panako_fingerprint (hash,resource_id,t,f) VALUES (?,?,?,?) "
+				+ "ON CONFLICT DO NOTHING";
 		int batchSize = Config.getInt(Key.PANAKO_PG_BATCH_SIZE);
 		Connection connection = connection();
 		try {
