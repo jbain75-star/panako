@@ -124,16 +124,22 @@ public class PanakoStoragePostgres implements PanakoStorage {
 	 * so a caller does not have to put a database password on a command line
 	 * where every other process on the machine can read it.
 	 *
+	 * The environment wins over the configuration: several of these keys have a
+	 * built-in default — the url defaults to a database on localhost — and a
+	 * default is not a decision anyone made. A caller that sets the variable
+	 * means it, and would otherwise be connected to a database it never asked
+	 * for. An explicit argument still wins, as it is not passed through here.
+	 *
 	 * @param key the configuration key
-	 * @return the configured value, or the environment variable of the same name
-	 *         when the configured value is empty.
+	 * @return the environment variable of the same name when it is set and not
+	 *         empty, otherwise the configured value.
 	 */
 	private String configOrEnvironment(Key key) {
-		String value = Config.get(key);
-		if (value != null && !value.isEmpty())
-			return value;
 		String fromEnvironment = System.getenv(key.name());
-		return fromEnvironment == null ? "" : fromEnvironment;
+		if (fromEnvironment != null && !fromEnvironment.isEmpty())
+			return fromEnvironment;
+		String value = Config.get(key);
+		return value == null ? "" : value;
 	}
 
 	private Connection connect() {
