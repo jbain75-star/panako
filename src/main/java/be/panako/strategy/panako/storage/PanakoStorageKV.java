@@ -238,14 +238,14 @@ public class PanakoStorageKV implements PanakoStorage{
 
 	@Override
 	public void processDeleteQueue() {
-		if (storeQueue.isEmpty())
+		if (deleteQueue.isEmpty())
 			return;
 		
 		long threadID = Thread.currentThread().getId();
-		if(!storeQueue.containsKey(threadID))
+		if(!deleteQueue.containsKey(threadID))
 			return;
 		
-		List<long[]> queue = storeQueue.get(threadID);
+		List<long[]> queue = deleteQueue.get(threadID);
 		
 		if (queue.isEmpty())
 			return;

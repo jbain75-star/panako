@@ -411,10 +411,34 @@ public enum Key{
 	PANAKO_MIN_MATCH_DURATION(5),
 	
 	/**
-	 * The storage to use: MEM|LMDB
-	 * Stands for Memory, files on disk or the LMDB key-value store
+	 * The storage to use: MEM|LMDB|PG
+	 * Stands for Memory, files on disk, the LMDB key-value store or a
+	 * PostgreSQL database.
 	 */
 	PANAKO_STORAGE("LMDB"),
+
+	/**
+	 * The JDBC url of the PostgreSQL fingerprint store, used when the storage is PG.
+	 */
+	PANAKO_PG_URL("jdbc:postgresql://localhost:5432/panako"),
+	/**
+	 * The user to connect to the PostgreSQL fingerprint store with.
+	 */
+	PANAKO_PG_USER("panako"),
+	/**
+	 * The password to connect to the PostgreSQL fingerprint store with.
+	 */
+	PANAKO_PG_PASSWORD(""),
+	/**
+	 * The number of ranges the hash space of the fingerprint table is split in.
+	 * Each partition keeps a smaller b-tree, which is what keeps random index
+	 * writes fast once the index no longer fits in memory.
+	 */
+	PANAKO_PG_PARTITIONS(16),
+	/**
+	 * The number of fingerprints sent to PostgreSQL in a single batch.
+	 */
+	PANAKO_PG_BATCH_SIZE(2000),
 
 	/**
 	 * Folder to store the lmdb databese
