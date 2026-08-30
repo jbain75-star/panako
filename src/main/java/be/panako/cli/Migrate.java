@@ -20,9 +20,14 @@
 
 package be.panako.cli;
 
+import java.io.File;
+
 import be.panako.strategy.panako.storage.PanakoStorageKV;
 import be.panako.strategy.panako.storage.PanakoStorageMigration;
 import be.panako.strategy.panako.storage.PanakoStoragePostgres;
+import be.panako.util.Config;
+import be.panako.util.FileUtils;
+import be.panako.util.Key;
 
 /**
  * Copies the fingerprints of the LMDB store into a PostgreSQL store.
@@ -64,6 +69,17 @@ class Migrate extends Application {
 			}
 		}
 
+		if (!sourceStoreExists()) {
+			// An LMDB store is created on demand, so a wrong or missing folder would
+			// otherwise read as a store with nothing in it: the copy would report
+			// success having moved nothing, and verification would agree.
+			System.err.println("There is no LMDB fingerprint store at "
+					+ FileUtils.expandHomeDir(Config.get(Key.PANAKO_LMDB_FOLDER))
+					+ ". Set PANAKO_LMDB_FOLDER to the store to copy.");
+			System.exit(1);
+			return;
+		}
+
 		PanakoStorageKV lmdb = PanakoStorageKV.getInstance();
 		PanakoStoragePostgres postgres = PanakoStoragePostgres.getInstance();
 		PanakoStorageMigration migration = new PanakoStorageMigration(lmdb, postgres, batchSize, minimumDuration);
@@ -73,7 +89,15 @@ class Migrate extends Application {
 		}
 
 		if (!verifyOnly) {
-			migration.migrate();
+			try {
+				migration.migrate();
+			} catch (IllegalStateException e) {
+				// A refusal to resume is an answer, not a crash: it is worth reading
+				// rather than being buried under a stack trace.
+				System.err.println(e.getMessage());
+				System.exit(1);
+				return;
+			}
 		}
 
 		if (verifyOnly || verifyAfter) {
@@ -84,6 +108,15 @@ class Migrate extends Application {
 				System.exit(1);
 			}
 		}
+	}
+
+	/**
+	 * Whether the configured LMDB folder actually holds a store: the data file
+	 * LMDB keeps everything in has to be there already.
+	 */
+	private boolean sourceStoreExists() {
+		File folder = new File(FileUtils.expandHomeDir(Config.get(Key.PANAKO_LMDB_FOLDER)));
+		return folder.isDirectory() && new File(folder, "data.mdb").exists();
 	}
 
 	@Override

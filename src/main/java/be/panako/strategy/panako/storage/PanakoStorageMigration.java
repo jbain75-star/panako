@@ -46,6 +46,9 @@ import org.lmdbjava.Txn;
 import org.postgresql.PGConnection;
 import org.postgresql.copy.CopyManager;
 
+import be.panako.util.Config;
+import be.panako.util.Key;
+
 /**
  * Copies an existing LMDB fingerprint store into a PostgreSQL one.
  *
@@ -127,10 +130,15 @@ public class PanakoStorageMigration {
 	public void migrate() {
 		Connection connection = target.migrationConnection();
 		createProgressTable(connection);
+		// Read before anything is written: a resume point that belongs to another
+		// store or another threshold has to stop the run while PostgreSQL still
+		// holds what the earlier run left there.
+		Long resumeAt = readProgress(connection);
+		removeLeftBehind(connection);
 		recordShortResources(connection);
 		long resources = copyMetadata(connection);
 		System.out.printf("> Copied meta-data of %d audio files\n", resources);
-		copyFingerprints(connection);
+		copyFingerprints(connection, resumeAt);
 	}
 
 	/**
@@ -190,25 +198,27 @@ public class PanakoStorageMigration {
 
 		int checked = 0;
 		int missing = 0;
-		if (sampleSize > 0 && lmdbFingerprints > 0) {
+		if (sampleSize > 0 && expectedFingerprints > 0) {
 			// Every nth fingerprint rather than the first n: the copy walks the hash
 			// space in order, so a sample taken from the start would pass while a
-			// half finished copy was missing everything above some hash.
-			long step = Math.max(1, lmdbFingerprints / sampleSize);
+			// half finished copy was missing everything above some hash. The stride
+			// counts only what should have been copied, so leaving files behind
+			// thins the sample rather than the coverage.
+			long step = Math.max(1, expectedFingerprints / sampleSize);
 			long seen = 0;
 			try (Txn<ByteBuffer> txn = source.env.txnRead();
 					CursorIterable<ByteBuffer> iterable = source.fingerprints.iterate(txn);
 					PreparedStatement statement = connection.prepareStatement(
 							"SELECT 1 FROM panako_fingerprint WHERE hash = ? AND resource_id = ? AND t = ? AND f = ?")) {
 				for (KeyVal<ByteBuffer> keyVal : iterable) {
-					if (seen++ % step != 0)
-						continue;
 					long hash = keyVal.key().order(ByteOrder.LITTLE_ENDIAN).getLong();
 					ByteBuffer value = keyVal.val();
 					int resourceID = value.getInt();
 					int t = value.getInt();
 					int f = value.getInt();
 					if (skipped.contains(resourceID))
+						continue;
+					if (seen++ % step != 0)
 						continue;
 					statement.setLong(1, hash);
 					statement.setInt(2, resourceID);
@@ -233,7 +243,11 @@ public class PanakoStorageMigration {
 			System.out.printf("> sampled:       %d fingerprints, %d missing\n", checked, missing);
 		}
 
-		boolean equal = expectedResources == pgResources && expectedFingerprints <= pgFingerprints && missing == 0
+		// Equal rather than "at least": LMDB keeps one entry per distinct
+		// fingerprint and PostgreSQL one row per distinct fingerprint, so a surplus
+		// in PostgreSQL is a print of something the source no longer holds - a
+		// stale answer waiting to be given.
+		boolean equal = expectedResources == pgResources && expectedFingerprints == pgFingerprints && missing == 0
 				&& metadataDifferences == 0;
 		System.out.println(equal ? "> the stores agree" : "> the stores DO NOT agree");
 		return equal;
@@ -279,6 +293,71 @@ public class PanakoStorageMigration {
 	}
 
 	/**
+	 * Take out what an earlier run copied and this one leaves behind. Raising the
+	 * threshold, or measuring a duration again, changes what belongs in PostgreSQL,
+	 * and a print that no longer belongs there is an answer waiting to be given
+	 * wrongly. Only the files that are actually present are deleted, so the usual
+	 * run costs one lookup in the table of audio files rather than a walk over
+	 * every fingerprint.
+	 */
+	private void removeLeftBehind(Connection connection) {
+		findShortResources();
+		if (skipped.isEmpty())
+			return;
+
+		StringBuilder ids = new StringBuilder();
+		for (Integer resourceID : skipped) {
+			if (ids.length() > 0)
+				ids.append(',');
+			ids.append(resourceID.longValue());
+		}
+
+		List<Long> present = new ArrayList<Long>();
+		try (Statement statement = connection.createStatement();
+				ResultSet result = statement.executeQuery(
+						"SELECT resource_id FROM panako_resource WHERE resource_id IN (" + ids + ")")) {
+			while (result.next()) {
+				present.add(Long.valueOf(result.getLong(1)));
+			}
+		} catch (SQLException e) {
+			throw new RuntimeException("Could not look for audio files that are no longer copied", e);
+		}
+		if (present.isEmpty())
+			return;
+
+		StringBuilder remove = new StringBuilder();
+		for (Long resourceID : present) {
+			if (remove.length() > 0)
+				remove.append(',');
+			remove.append(resourceID.longValue());
+		}
+		try {
+			connection.setAutoCommit(false);
+			try (Statement statement = connection.createStatement()) {
+				int fingerprints = statement
+						.executeUpdate("DELETE FROM panako_fingerprint WHERE resource_id IN (" + remove + ")");
+				statement.executeUpdate("DELETE FROM panako_resource WHERE resource_id IN (" + remove + ")");
+				connection.commit();
+				System.out.printf("> %d audio files copied earlier are left behind now: %d fingerprints removed\n",
+						present.size(), fingerprints);
+			}
+		} catch (SQLException e) {
+			try {
+				connection.rollback();
+			} catch (SQLException rollbackFailure) {
+				LOG.warning("Could not roll back a removal: " + rollbackFailure.getMessage());
+			}
+			throw new RuntimeException("Could not remove the audio files that are no longer copied", e);
+		} finally {
+			try {
+				connection.setAutoCommit(true);
+			} catch (SQLException e) {
+				LOG.warning("Could not restore auto commit: " + e.getMessage());
+			}
+		}
+	}
+
+	/**
 	 * Write the files that are left behind to their own table, so whoever fetches
 	 * audio can be handed the list rather than having to guess at it.
 	 */
@@ -293,6 +372,27 @@ public class PanakoStorageMigration {
 		} catch (SQLException e) {
 			throw new RuntimeException("Could not create the table of short audio files", e);
 		}
+		// The list answers "what is worth fetching in full" now, rather than
+		// logging everything ever left behind: a file that no longer qualifies -
+		// because the threshold moved, or because its duration was measured again -
+		// has to leave it, or someone is sent after a record already held in full.
+		try (Statement statement = connection.createStatement()) {
+			if (skipped.isEmpty()) {
+				statement.executeUpdate("DELETE FROM panako_migration_short_resource");
+			} else {
+				StringBuilder keep = new StringBuilder();
+				for (Integer resourceID : skipped) {
+					if (keep.length() > 0)
+						keep.append(',');
+					keep.append(resourceID.longValue());
+				}
+				statement.executeUpdate(
+						"DELETE FROM panako_migration_short_resource WHERE resource_id NOT IN (" + keep + ")");
+			}
+		} catch (SQLException e) {
+			throw new RuntimeException("Could not remove the audio files that are no longer left behind", e);
+		}
+
 		if (skipped.isEmpty())
 			return;
 
@@ -317,10 +417,9 @@ public class PanakoStorageMigration {
 				skipped.size(), minimumDuration);
 	}
 
-	private void copyFingerprints(Connection connection) {
+	private void copyFingerprints(Connection connection, Long resumeAt) {
 		createStagingTable(connection);
 
-		Long resumeAt = readProgress(connection);
 		if (resumeAt != null) {
 			System.out.printf("> Resuming at hash %d\n", resumeAt);
 		}
@@ -428,12 +527,16 @@ public class PanakoStorageMigration {
 						+ "SELECT hash,resource_id,t,f FROM panako_migration_staging ON CONFLICT DO NOTHING");
 			}
 			try (PreparedStatement statement = connection.prepareStatement(
-					"INSERT INTO panako_migration_progress (id,last_hash,fingerprints) VALUES (1,?,?) "
+					"INSERT INTO panako_migration_progress (id,last_hash,fingerprints,source,minimum_duration) "
+					+ "VALUES (1,?,?,?,?) "
 					+ "ON CONFLICT (id) DO UPDATE SET last_hash = EXCLUDED.last_hash, "
 					+ "fingerprints = panako_migration_progress.fingerprints + EXCLUDED.fingerprints, "
+					+ "source = EXCLUDED.source, minimum_duration = EXCLUDED.minimum_duration, "
 					+ "updated_at = now()")) {
 				statement.setLong(1, batch.lastHash);
 				statement.setLong(2, batch.rows);
+				statement.setString(3, sourceName());
+				statement.setFloat(4, minimumDuration);
 				statement.executeUpdate();
 			}
 			connection.commit();
@@ -560,9 +663,21 @@ public class PanakoStorageMigration {
 					+ "last_hash bigint NOT NULL,"
 					+ "fingerprints bigint NOT NULL,"
 					+ "updated_at timestamptz NOT NULL DEFAULT now())");
+			// A resume point is a hash of one store copied under one threshold. Both
+			// are kept beside it, so a run against another store, or with another
+			// threshold, cannot quietly continue from it.
+			statement.execute("ALTER TABLE panako_migration_progress "
+					+ "ADD COLUMN IF NOT EXISTS source text NOT NULL DEFAULT ''");
+			statement.execute("ALTER TABLE panako_migration_progress "
+					+ "ADD COLUMN IF NOT EXISTS minimum_duration real NOT NULL DEFAULT 0");
 		} catch (SQLException e) {
 			throw new RuntimeException("Could not create the migration progress table", e);
 		}
+	}
+
+	/** The store being read, as it is configured, to hold a resume point to. */
+	private String sourceName() {
+		return Config.get(Key.PANAKO_LMDB_FOLDER);
 	}
 
 	private void createStagingTable(Connection connection) {
@@ -583,8 +698,23 @@ public class PanakoStorageMigration {
 	private Long readProgress(Connection connection) {
 		try (Statement statement = connection.createStatement();
 				ResultSet result = statement.executeQuery(
-						"SELECT last_hash FROM panako_migration_progress WHERE id = 1")) {
-			return result.next() ? Long.valueOf(result.getLong(1)) : null;
+						"SELECT last_hash,source,minimum_duration FROM panako_migration_progress WHERE id = 1")) {
+			if (!result.next())
+				return null;
+			long lastHash = result.getLong(1);
+			String progressSource = result.getString(2);
+			float progressDuration = result.getFloat(3);
+			boolean sameSource = progressSource == null || progressSource.isEmpty()
+					|| progressSource.equals(sourceName());
+			if (!sameSource || progressDuration != minimumDuration) {
+				throw new IllegalStateException(String.format(
+						"The progress in this database was made copying '%s' with a minimum duration of %.1f "
+								+ "seconds, and this run reads '%s' with %.1f. Continuing from it would leave "
+								+ "fingerprints behind, or keep ones that are now left behind: run "
+								+ "'panako migrate --restart' to start over.",
+						progressSource, progressDuration, sourceName(), minimumDuration));
+			}
+			return Long.valueOf(lastHash);
 		} catch (SQLException e) {
 			throw new RuntimeException("Could not read the migration progress", e);
 		}

@@ -36,7 +36,14 @@ Changed by AudioScout, 2026:
   only matches while those thirty seconds play - and lists them in
   `panako_migration_short_resource` instead, as the files worth fetching in
   full. A duration of zero is unknown rather than short, so such a file is
-  copied.
+  copied. A resume point belongs to one store copied under one threshold: both
+  are recorded beside it and a run with either changed refuses to continue and
+  asks for `--restart`, since a threshold that moved decides different rows.
+  What an earlier run copied and this one leaves behind is removed from
+  PostgreSQL, and the list of files worth fetching in full is the current
+  selection rather than everything ever left behind. Verification holds the two
+  stores to the same number of fingerprints rather than a minimum, so a print of
+  something the source no longer holds is a difference.
 - **Configuration arguments split on the first `=` only** (`be.panako.cli.Panako`),
   so a value containing one — a JDBC url with query parameters — is no longer
   truncated.
