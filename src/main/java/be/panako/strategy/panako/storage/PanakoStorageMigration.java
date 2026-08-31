@@ -188,6 +188,7 @@ public class PanakoStorageMigration {
 			recordRunResources(connection);
 		}
 		removeLeftBehind(connection);
+		removeVanished(connection);
 		recordShortResources(connection);
 		long resources = copyMetadata(connection);
 		System.out.printf("> Copied meta-data of %d audio files\n", resources);
@@ -460,6 +461,65 @@ public class PanakoStorageMigration {
 				LOG.warning("Could not roll back a removal: " + rollbackFailure.getMessage());
 			}
 			throw new RuntimeException("Could not remove the audio files that are no longer copied", e);
+		} finally {
+			try {
+				connection.setAutoCommit(true);
+			} catch (SQLException e) {
+				LOG.warning("Could not restore auto commit: " + e.getMessage());
+			}
+		}
+	}
+
+	/**
+	 * Take out what PostgreSQL holds and the source no longer does. A file copied
+	 * by an earlier run and since deleted from the source is a name waiting to be
+	 * given to a record that is gone, and the source is what the copy is a copy of:
+	 * it decides. Nothing stored since a run began is touched, because a file that
+	 * has just been stored is in the source.
+	 */
+	private void removeVanished(Connection connection) {
+		Set<Long> held = new HashSet<Long>();
+		for (Object[] row : readMetadata()) {
+			held.add((Long) row[0]);
+		}
+
+		List<Long> vanished = new ArrayList<Long>();
+		try (Statement statement = connection.createStatement();
+				ResultSet result = statement.executeQuery("SELECT resource_id FROM panako_resource")) {
+			while (result.next()) {
+				Long resourceID = Long.valueOf(result.getLong(1));
+				if (!held.contains(resourceID))
+					vanished.add(resourceID);
+			}
+		} catch (SQLException e) {
+			throw new RuntimeException("Could not look for audio files the source no longer holds", e);
+		}
+		if (vanished.isEmpty())
+			return;
+
+		StringBuilder remove = new StringBuilder();
+		for (Long resourceID : vanished) {
+			if (remove.length() > 0)
+				remove.append(',');
+			remove.append(resourceID.longValue());
+		}
+		try {
+			connection.setAutoCommit(false);
+			try (Statement statement = connection.createStatement()) {
+				int fingerprints = statement
+						.executeUpdate("DELETE FROM panako_fingerprint WHERE resource_id IN (" + remove + ")");
+				statement.executeUpdate("DELETE FROM panako_resource WHERE resource_id IN (" + remove + ")");
+				connection.commit();
+				System.out.printf("> %d audio files are no longer in the source: %d fingerprints removed\n",
+						vanished.size(), fingerprints);
+			}
+		} catch (SQLException e) {
+			try {
+				connection.rollback();
+			} catch (SQLException rollbackFailure) {
+				LOG.warning("Could not roll back a removal: " + rollbackFailure.getMessage());
+			}
+			throw new RuntimeException("Could not remove the audio files the source no longer holds", e);
 		} finally {
 			try {
 				connection.setAutoCommit(true);
