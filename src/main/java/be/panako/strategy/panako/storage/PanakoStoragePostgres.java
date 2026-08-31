@@ -452,9 +452,13 @@ public class PanakoStoragePostgres implements PanakoStorage {
 					}
 				}
 			}
-			queue.clear();
 		} catch (SQLException e) {
 			throw new RuntimeException("Could not query fingerprints", e);
+		} finally {
+			// The hashes belong to the query that is over, answered or not. Left
+			// behind, they are asked again alongside the next query's own, and the
+			// hits they bring back belong to audio the caller is no longer holding.
+			queue.clear();
 		}
 	}
 
