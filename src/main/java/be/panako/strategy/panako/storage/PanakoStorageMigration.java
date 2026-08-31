@@ -31,8 +31,10 @@ import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Statement;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 import java.util.logging.Logger;
 
@@ -99,6 +101,17 @@ import be.panako.util.Key;
  * walk begins and kept while it resumes, and the next walk takes them again:
  * that next walk is the one that copies whatever arrived during this one.
  * </p>
+ *
+ * <p>
+ * A walk that reaches the last hash writes down the files it has taken across
+ * whole, and later walks read past those files without offering their
+ * fingerprints again. Offering them is not wrong - they conflict and are
+ * skipped - but each one is a lookup in an index of hundreds of millions of
+ * rows held on a disk far larger than memory, and paying that for a whole
+ * library to copy a few hundred new files is the difference between an hour and
+ * days. A file printed again in the meantime has a different number of prints
+ * to the number written down, and is offered again.
+ * </p>
  */
 public class PanakoStorageMigration {
 
@@ -135,6 +148,15 @@ public class PanakoStorageMigration {
 	private Set<Integer> runResources = null;
 
 	/**
+	 * Files an earlier, finished walk copied whole, and which the source still
+	 * holds unchanged. Their fingerprints are not offered to PostgreSQL again:
+	 * offering them means a lookup in an index of hundreds of millions of rows per
+	 * fingerprint, which is what turns a top-up of a few hundred files into days
+	 * of work. Empty until a finished run has written any down.
+	 */
+	private Set<Integer> alreadyCopied = new HashSet<Integer>();
+
+	/**
 	 * Files whose length was never recorded. They are copied - a length that was
 	 * never measured is not a short length - and counted, because a file that is
 	 * only thirty seconds long and does not say so is copied along with them.
@@ -163,6 +185,7 @@ public class PanakoStorageMigration {
 		Connection connection = target.migrationConnection();
 		createProgressTable(connection);
 		createRunTable(connection);
+		createCopiedTable(connection);
 		// Read before anything is written: a resume point that belongs to another
 		// store or another threshold has to stop the run while PostgreSQL still
 		// holds what the earlier run left there.
@@ -189,7 +212,9 @@ public class PanakoStorageMigration {
 		}
 		removeLeftBehind(connection);
 		removeVanished(connection);
+		removeReprinted(connection);
 		recordShortResources(connection);
+		readAlreadyCopied(connection);
 		long resources = copyMetadata(connection);
 		System.out.printf("> Copied meta-data of %d audio files\n", resources);
 		copyFingerprints(connection, resumeAt);
@@ -203,9 +228,13 @@ public class PanakoStorageMigration {
 		Connection connection = target.migrationConnection();
 		createProgressTable(connection);
 		createRunTable(connection);
+		createCopiedTable(connection);
 		try (Statement statement = connection.createStatement()) {
 			statement.execute("DELETE FROM panako_migration_progress");
 			statement.execute("TRUNCATE panako_migration_run_resource");
+			// Starting over means every fingerprint is offered again, so no file may
+			// be counted as one an earlier walk already took across whole.
+			statement.execute("TRUNCATE panako_migration_copied_resource");
 		} catch (SQLException e) {
 			throw new RuntimeException("Could not clear the migration progress", e);
 		}
@@ -530,6 +559,68 @@ public class PanakoStorageMigration {
 	}
 
 	/**
+	 * Take out the prints of a file the source has printed again. A record first
+	 * held as a thirty second preview and later stored in full keeps its
+	 * identifier, and the prints of the preview stay in PostgreSQL beside the ones
+	 * of the full record: a surplus, and thirty seconds of a record answering for
+	 * the whole of it. The number of prints the source records for a file is what
+	 * gives it away, so the old prints go and the walk brings the new ones.
+	 */
+	private void removeReprinted(Connection connection) {
+		Map<Long, Integer> held = new HashMap<Long, Integer>();
+		for (Object[] row : readMetadata()) {
+			held.put((Long) row[0], (Integer) row[3]);
+		}
+
+		List<Long> reprinted = new ArrayList<Long>();
+		try (Statement statement = connection.createStatement();
+				ResultSet result = statement.executeQuery("SELECT resource_id,fingerprints FROM panako_resource")) {
+			while (result.next()) {
+				Long resourceID = Long.valueOf(result.getLong(1));
+				Integer prints = held.get(resourceID);
+				if (prints != null && prints.intValue() != result.getInt(2))
+					reprinted.add(resourceID);
+			}
+		} catch (SQLException e) {
+			throw new RuntimeException("Could not look for audio files that have been printed again", e);
+		}
+		if (reprinted.isEmpty())
+			return;
+
+		StringBuilder remove = new StringBuilder();
+		for (Long resourceID : reprinted) {
+			if (remove.length() > 0)
+				remove.append(',');
+			remove.append(resourceID.longValue());
+		}
+		try {
+			connection.setAutoCommit(false);
+			try (Statement statement = connection.createStatement()) {
+				int fingerprints = statement
+						.executeUpdate("DELETE FROM panako_fingerprint WHERE resource_id IN (" + remove + ")");
+				statement.executeUpdate(
+						"DELETE FROM panako_migration_copied_resource WHERE resource_id IN (" + remove + ")");
+				connection.commit();
+				System.out.printf("> %d audio files have been printed again: %d older fingerprints removed\n",
+						reprinted.size(), fingerprints);
+			}
+		} catch (SQLException e) {
+			try {
+				connection.rollback();
+			} catch (SQLException rollbackFailure) {
+				LOG.warning("Could not roll back a removal: " + rollbackFailure.getMessage());
+			}
+			throw new RuntimeException("Could not remove the older prints of a file printed again", e);
+		} finally {
+			try {
+				connection.setAutoCommit(true);
+			} catch (SQLException e) {
+				LOG.warning("Could not restore auto commit: " + e.getMessage());
+			}
+		}
+	}
+
+	/**
 	 * Write the files that are left behind to their own table, so whoever fetches
 	 * audio can be handed the list rather than having to guess at it.
 	 */
@@ -691,8 +782,9 @@ public class PanakoStorageMigration {
 				int resourceID = value.getInt();
 				int t = value.getInt();
 				int f = value.getInt();
-				if (!copies(resourceID)) {
-					// Left behind for being short, or stored after this run began.
+				if (!copies(resourceID) || alreadyCopied.contains(Integer.valueOf(resourceID))) {
+					// Left behind for being short, stored after this run began, or
+					// already taken across whole by a walk that finished.
 					// Still a hash that was read, so the batch may end here: the resume
 					// point is a hash, not a row.
 					previousHash = hash;
@@ -979,13 +1071,116 @@ public class PanakoStorageMigration {
 		runResources = recorded || !resources.isEmpty() ? resources : null;
 	}
 
-	/** Write down that the walk has met the last hash. */
+	/**
+	 * Write down that the walk has met the last hash, and with it the files it has
+	 * now taken across whole. A walk that reached the last hash was offered every
+	 * fingerprint of every file it was copying, so those files are complete in
+	 * PostgreSQL and the next walk can pass them by.
+	 */
 	private void completeRun(Connection connection) {
 		try (Statement statement = connection.createStatement()) {
 			statement.executeUpdate("UPDATE panako_migration_progress SET completed = true, updated_at = now() "
 					+ "WHERE id = 1");
 		} catch (SQLException e) {
 			throw new RuntimeException("Could not record that the copy reached the last hash", e);
+		}
+		recordCopied(connection);
+	}
+
+	/**
+	 * The table naming the files a finished walk took across whole, beside the
+	 * number of fingerprints the source recorded for each. The count is what tells
+	 * a file apart from the same file printed again: a record first held as a
+	 * thirty second preview and later printed in full has more prints than was
+	 * written down here, so it is offered again rather than passed by.
+	 */
+	private void createCopiedTable(Connection connection) {
+		try (Statement statement = connection.createStatement()) {
+			statement.execute("CREATE TABLE IF NOT EXISTS panako_migration_copied_resource ("
+					+ "resource_id bigint PRIMARY KEY,"
+					+ "fingerprints integer NOT NULL)");
+		} catch (SQLException e) {
+			throw new RuntimeException("Could not create the table of files already copied whole", e);
+		}
+	}
+
+	/** Write down the files this finished walk has taken across whole. */
+	private void recordCopied(Connection connection) {
+		String sql = "INSERT INTO panako_migration_copied_resource (resource_id,fingerprints) VALUES (?,?) "
+				+ "ON CONFLICT (resource_id) DO UPDATE SET fingerprints = EXCLUDED.fingerprints";
+		try {
+			connection.setAutoCommit(false);
+			try (PreparedStatement statement = connection.prepareStatement(sql)) {
+				for (Object[] row : readMetadata()) {
+					if (!copies(((Long) row[0]).intValue()))
+						continue;
+					statement.setLong(1, (Long) row[0]);
+					statement.setInt(2, (Integer) row[3]);
+					statement.addBatch();
+				}
+				statement.executeBatch();
+			}
+			connection.commit();
+		} catch (SQLException e) {
+			try {
+				connection.rollback();
+			} catch (SQLException rollbackFailure) {
+				LOG.warning("Could not roll back the list of files copied whole: " + rollbackFailure.getMessage());
+			}
+			throw new RuntimeException("Could not write down the files this run copied whole", e);
+		} finally {
+			try {
+				connection.setAutoCommit(true);
+			} catch (SQLException e) {
+				LOG.warning("Could not restore auto commit: " + e.getMessage());
+			}
+		}
+	}
+
+	/**
+	 * Fill {@link #alreadyCopied}: the files a finished walk took across whole,
+	 * that the source still holds with the same number of prints, and that
+	 * PostgreSQL still holds a name for. Any of those three failing means the file
+	 * is offered again, which costs a walk and cannot go wrong: fingerprints
+	 * already there conflict and are skipped.
+	 */
+	private void readAlreadyCopied(Connection connection) {
+		alreadyCopied = new HashSet<Integer>();
+
+		Set<Integer> named = new HashSet<Integer>();
+		try (Statement statement = connection.createStatement();
+				ResultSet result = statement.executeQuery("SELECT resource_id FROM panako_resource")) {
+			while (result.next()) {
+				named.add(Integer.valueOf((int) result.getLong(1)));
+			}
+		} catch (SQLException e) {
+			throw new RuntimeException("Could not read the audio files PostgreSQL holds", e);
+		}
+
+		Map<Integer, Integer> whole = new HashMap<Integer, Integer>();
+		try (Statement statement = connection.createStatement();
+				ResultSet result = statement
+						.executeQuery("SELECT resource_id,fingerprints FROM panako_migration_copied_resource")) {
+			while (result.next()) {
+				Integer resourceID = Integer.valueOf((int) result.getLong(1));
+				if (named.contains(resourceID))
+					whole.put(resourceID, Integer.valueOf(result.getInt(2)));
+			}
+		} catch (SQLException e) {
+			throw new RuntimeException("Could not read the files already copied whole", e);
+		}
+		if (whole.isEmpty())
+			return;
+
+		for (Object[] row : readMetadata()) {
+			Integer resourceID = Integer.valueOf(((Long) row[0]).intValue());
+			Integer prints = whole.get(resourceID);
+			if (prints != null && prints.intValue() == ((Integer) row[3]).intValue())
+				alreadyCopied.add(resourceID);
+		}
+		if (!alreadyCopied.isEmpty()) {
+			System.out.printf("> %d audio files were copied whole already: walked past, not offered again\n",
+					alreadyCopied.size());
 		}
 	}
 
