@@ -44,6 +44,25 @@ Changed by AudioScout, 2026:
   selection rather than everything ever left behind. Verification holds the two
   stores to the same number of fingerprints rather than a minimum, so a print of
   something the source no longer holds is a difference.
+- **A `serve` command** (`be.panako.cli.Serve`) that answers queries read from
+  standard input, keeping the index open between them. `query` is a whole
+  process per question — a JVM starts, the index is opened, one file is matched,
+  everything is discarded — which for a service answering one clip at a time is
+  nearly all of the wait: measured against a live index, about a second of
+  matching arrived eleven seconds after it was asked for, and four seconds of
+  audio took longer than thirty seconds of audio did, a bill that plainly has
+  nothing to do with the audio. This command pays it once. Its conversation is
+  line based so it needs no library on either side: it prints `READY` when the
+  storage is open, then for each `<id>\t<audio file>` line read from standard
+  input prints `BEGIN <id>`, the result rows exactly as `query` prints them, and
+  `END <id> ok` or `END <id> error <what went wrong>`; `QUIT` or end of input
+  stops it. Identifiers are the caller's and are echoed rather than interpreted.
+  One query at a time, in the order asked, since a query is CPU and memory
+  hungry and the index is memory mapped — concurrency belongs to the caller,
+  which runs several of these. Nothing a query can throw stops the process: a
+  file that cannot be read or decoded is reported against its own identifier and
+  the next question is answered normally, because a service that dies on one bad
+  clip hands back the warm index it exists to keep.
 - **Configuration arguments split on the first `=` only** (`be.panako.cli.Panako`),
   so a value containing one — a JDBC url with query parameters — is no longer
   truncated.
