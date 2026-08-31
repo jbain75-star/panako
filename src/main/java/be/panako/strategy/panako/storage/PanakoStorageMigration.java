@@ -465,7 +465,9 @@ public class PanakoStorageMigration {
 		List<Long> present = new ArrayList<Long>();
 		try (Statement statement = connection.createStatement();
 				ResultSet result = statement.executeQuery(
-						"SELECT resource_id FROM panako_resource WHERE resource_id IN (" + ids + ")")) {
+						"SELECT resource_id FROM panako_resource WHERE resource_id IN (" + ids + ") "
+								+ "UNION SELECT resource_id FROM panako_migration_copied_resource "
+								+ "WHERE resource_id IN (" + ids + ")")) {
 			while (result.next()) {
 				present.add(Long.valueOf(result.getLong(1)));
 			}
@@ -487,6 +489,8 @@ public class PanakoStorageMigration {
 				int fingerprints = statement
 						.executeUpdate("DELETE FROM panako_fingerprint WHERE resource_id IN (" + remove + ")");
 				statement.executeUpdate("DELETE FROM panako_resource WHERE resource_id IN (" + remove + ")");
+				statement.executeUpdate(
+						"DELETE FROM panako_migration_copied_resource WHERE resource_id IN (" + remove + ")");
 				connection.commit();
 				System.out.printf("> %d audio files copied earlier are left behind now: %d fingerprints removed\n",
 						present.size(), fingerprints);
@@ -520,16 +524,23 @@ public class PanakoStorageMigration {
 			held.add((Long) row[0]);
 		}
 
-		List<Long> vanished = new ArrayList<Long>();
+		// Every name PostgreSQL knows a file under, not just the meta-data: a file
+		// whose meta-data has already gone can still be holding prints, and a scan
+		// that only reads meta-data would never find them to take them out.
+		Set<Long> known = new HashSet<Long>();
 		try (Statement statement = connection.createStatement();
-				ResultSet result = statement.executeQuery("SELECT resource_id FROM panako_resource")) {
+				ResultSet result = statement.executeQuery("SELECT resource_id FROM panako_resource "
+						+ "UNION SELECT resource_id FROM panako_migration_copied_resource")) {
 			while (result.next()) {
-				Long resourceID = Long.valueOf(result.getLong(1));
-				if (!held.contains(resourceID))
-					vanished.add(resourceID);
+				known.add(Long.valueOf(result.getLong(1)));
 			}
 		} catch (SQLException e) {
 			throw new RuntimeException("Could not look for audio files the source no longer holds", e);
+		}
+		List<Long> vanished = new ArrayList<Long>();
+		for (Long resourceID : known) {
+			if (!held.contains(resourceID))
+				vanished.add(resourceID);
 		}
 		if (vanished.isEmpty())
 			return;
@@ -546,6 +557,8 @@ public class PanakoStorageMigration {
 				int fingerprints = statement
 						.executeUpdate("DELETE FROM panako_fingerprint WHERE resource_id IN (" + remove + ")");
 				statement.executeUpdate("DELETE FROM panako_resource WHERE resource_id IN (" + remove + ")");
+				statement.executeUpdate(
+						"DELETE FROM panako_migration_copied_resource WHERE resource_id IN (" + remove + ")");
 				connection.commit();
 				System.out.printf("> %d audio files are no longer in the source: %d fingerprints removed\n",
 						vanished.size(), fingerprints);
@@ -1164,9 +1177,15 @@ public class PanakoStorageMigration {
 
 	/**
 	 * Fill {@link #alreadyCopied}: the files PostgreSQL holds as many prints of as
-	 * the source records, and still holds a name for. Either failing means the
-	 * file is offered again, which costs a walk and cannot go wrong: fingerprints
-	 * already there conflict and are skipped.
+	 * the source holds entries for, and still holds a name for. Either failing
+	 * means the file is offered again, which costs a walk and cannot go wrong:
+	 * fingerprints already there conflict and are skipped.
+	 *
+	 * The source's entries are counted rather than read from its meta-data: the
+	 * meta-data records how many prints were extracted from a file, which is not
+	 * how many entries they occupy once identical ones have collapsed. Judged
+	 * against the extracted number, a file whose prints collapsed can never be
+	 * across whole, and is offered again on every walk for ever.
 	 */
 	private void readAlreadyCopied(Connection connection) {
 		alreadyCopied = new HashSet<Integer>();
@@ -1196,11 +1215,20 @@ public class PanakoStorageMigration {
 		if (whole.isEmpty())
 			return;
 
-		for (Object[] row : readMetadata()) {
-			Integer resourceID = Integer.valueOf(((Long) row[0]).intValue());
-			Integer prints = whole.get(resourceID);
-			if (prints != null && prints.intValue() == ((Integer) row[3]).intValue())
-				alreadyCopied.add(resourceID);
+		Map<Integer, Integer> entries = new HashMap<Integer, Integer>();
+		try (Txn<ByteBuffer> txn = source.env.txnRead();
+				CursorIterable<ByteBuffer> iterable = source.fingerprints.iterate(txn)) {
+			for (KeyVal<ByteBuffer> keyVal : iterable) {
+				Integer resourceID = Integer.valueOf(keyVal.val().getInt());
+				if (!whole.containsKey(resourceID))
+					continue;
+				Integer count = entries.get(resourceID);
+				entries.put(resourceID, Integer.valueOf(count == null ? 1 : count.intValue() + 1));
+			}
+		}
+		for (Map.Entry<Integer, Integer> held : whole.entrySet()) {
+			if (held.getValue().equals(entries.get(held.getKey())))
+				alreadyCopied.add(held.getKey());
 		}
 		if (!alreadyCopied.isEmpty()) {
 			System.out.printf("> %d audio files are across whole already: walked past, not offered again\n",
