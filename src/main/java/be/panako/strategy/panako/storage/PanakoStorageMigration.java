@@ -148,13 +148,15 @@ public class PanakoStorageMigration {
 	private Set<Integer> runResources = null;
 
 	/**
-	 * Files an earlier, finished walk copied whole, and which the source still
-	 * holds unchanged. Their fingerprints are not offered to PostgreSQL again:
-	 * offering them means a lookup in an index of hundreds of millions of rows per
-	 * fingerprint, which is what turns a top-up of a few hundred files into days
-	 * of work. Empty until a finished run has written any down.
+	 * Files PostgreSQL already holds every print of, and which the source still
+	 * holds unchanged. Their fingerprints are not offered again: offering them
+	 * means a lookup in an index of hundreds of millions of rows per fingerprint,
+	 * which is what turns a top-up of a few hundred files into days of work.
 	 */
 	private Set<Integer> alreadyCopied = new HashSet<Integer>();
+
+	/** Whether the walk before this one reached the last hash. */
+	private boolean lastWalkFinished = false;
 
 	/**
 	 * Files whose length was never recorded. They are copied - a length that was
@@ -214,7 +216,13 @@ public class PanakoStorageMigration {
 		removeVanished(connection);
 		removeReprinted(connection);
 		recordShortResources(connection);
-		readAlreadyCopied(connection);
+		// Nothing is walked past on a copy that has never finished one walk, nor on
+		// one started over on purpose: both are asked to offer everything, and
+		// counting what is there would quietly excuse most of it.
+		if (lastWalkFinished || copiedAnything(connection)) {
+			countCopied(connection);
+			readAlreadyCopied(connection);
+		}
 		long resources = copyMetadata(connection);
 		System.out.printf("> Copied meta-data of %d audio files\n", resources);
 		copyFingerprints(connection, resumeAt);
@@ -1084,15 +1092,16 @@ public class PanakoStorageMigration {
 		} catch (SQLException e) {
 			throw new RuntimeException("Could not record that the copy reached the last hash", e);
 		}
-		recordCopied(connection);
+		countCopied(connection);
 	}
 
 	/**
-	 * The table naming the files a finished walk took across whole, beside the
-	 * number of fingerprints the source recorded for each. The count is what tells
-	 * a file apart from the same file printed again: a record first held as a
-	 * thirty second preview and later printed in full has more prints than was
-	 * written down here, so it is offered again rather than passed by.
+	 * The table naming every audio file PostgreSQL holds prints of, beside how
+	 * many of them it holds. Set against the number the source records for the
+	 * same file it answers what a walk needs to know: a file with fewer is not
+	 * across whole, and a file with more or fewer than the source now says has
+	 * been printed again since - a record first held as a thirty second preview
+	 * and later printed in full does not have the number written down here.
 	 */
 	private void createCopiedTable(Connection connection) {
 		try (Statement statement = connection.createStatement()) {
@@ -1104,30 +1113,46 @@ public class PanakoStorageMigration {
 		}
 	}
 
-	/** Write down the files this finished walk has taken across whole. */
-	private void recordCopied(Connection connection) {
-		String sql = "INSERT INTO panako_migration_copied_resource (resource_id,fingerprints) VALUES (?,?) "
-				+ "ON CONFLICT (resource_id) DO UPDATE SET fingerprints = EXCLUDED.fingerprints";
+	/** Whether any file is written down as one PostgreSQL holds prints of. */
+	private boolean copiedAnything(Connection connection) {
+		return count(connection, "SELECT count(*) FROM panako_migration_copied_resource") > 0;
+	}
+
+	/**
+	 * Count the fingerprints PostgreSQL holds, per audio file, and write the
+	 * counts down.
+	 *
+	 * A walk that reaches the last hash is offered every print of every file it
+	 * copies, so this used to write down the source's own number and call those
+	 * files across whole. That takes a walk at its word about what it inserted.
+	 * One could not be taken at its word - a full disk stopped it - and 6,624
+	 * files were written down as complete while four million of their prints were
+	 * missing, which no later top-up would ever look at again. Counting the rows
+	 * that are actually there cannot make that mistake, and it mends a store that
+	 * already has: a file short of its prints no longer matches the number the
+	 * source records, so the next walk offers it again.
+	 *
+	 * Some three minutes over three hundred million rows, once per run.
+	 */
+	private void countCopied(Connection connection) {
 		try {
 			connection.setAutoCommit(false);
-			try (PreparedStatement statement = connection.prepareStatement(sql)) {
-				for (Object[] row : readMetadata()) {
-					if (!copies(((Long) row[0]).intValue()))
-						continue;
-					statement.setLong(1, (Long) row[0]);
-					statement.setInt(2, (Integer) row[3]);
-					statement.addBatch();
-				}
-				statement.executeBatch();
+			try (Statement statement = connection.createStatement()) {
+				// Written afresh rather than merged: a file whose prints have all been
+				// taken out holds none, and no row here should be left saying otherwise.
+				statement.executeUpdate("DELETE FROM panako_migration_copied_resource");
+				statement.executeUpdate("INSERT INTO panako_migration_copied_resource (resource_id,fingerprints) "
+						+ "SELECT resource_id,count(*) FROM panako_fingerprint GROUP BY resource_id");
 			}
 			connection.commit();
 		} catch (SQLException e) {
 			try {
 				connection.rollback();
 			} catch (SQLException rollbackFailure) {
-				LOG.warning("Could not roll back the list of files copied whole: " + rollbackFailure.getMessage());
+				LOG.warning("Could not roll back the count of what is already copied: "
+						+ rollbackFailure.getMessage());
 			}
-			throw new RuntimeException("Could not write down the files this run copied whole", e);
+			throw new RuntimeException("Could not count the fingerprints PostgreSQL already holds", e);
 		} finally {
 			try {
 				connection.setAutoCommit(true);
@@ -1138,10 +1163,9 @@ public class PanakoStorageMigration {
 	}
 
 	/**
-	 * Fill {@link #alreadyCopied}: the files a finished walk took across whole,
-	 * that the source still holds with the same number of prints, and that
-	 * PostgreSQL still holds a name for. Any of those three failing means the file
-	 * is offered again, which costs a walk and cannot go wrong: fingerprints
+	 * Fill {@link #alreadyCopied}: the files PostgreSQL holds as many prints of as
+	 * the source records, and still holds a name for. Either failing means the
+	 * file is offered again, which costs a walk and cannot go wrong: fingerprints
 	 * already there conflict and are skipped.
 	 */
 	private void readAlreadyCopied(Connection connection) {
@@ -1179,7 +1203,7 @@ public class PanakoStorageMigration {
 				alreadyCopied.add(resourceID);
 		}
 		if (!alreadyCopied.isEmpty()) {
-			System.out.printf("> %d audio files were copied whole already: walked past, not offered again\n",
+			System.out.printf("> %d audio files are across whole already: walked past, not offered again\n",
 					alreadyCopied.size());
 		}
 	}
@@ -1213,7 +1237,8 @@ public class PanakoStorageMigration {
 			long lastHash = result.getLong(1);
 			String progressSource = result.getString(2);
 			float progressDuration = result.getFloat(3);
-			if (result.getBoolean(4)) {
+			lastWalkFinished = result.getBoolean(4);
+			if (lastWalkFinished) {
 				// The last walk finished. There is nothing above its last hash, and
 				// what has been stored since is below it: this is a new run, over
 				// everything, and the fingerprints already copied cost one conflict
