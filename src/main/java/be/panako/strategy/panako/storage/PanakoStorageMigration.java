@@ -540,6 +540,15 @@ public class PanakoStorageMigration {
 			System.out.printf("> Resuming at hash %d\n", resumeAt);
 		}
 
+		// The hash the walk ends at, said out loud once: how far along a run is is
+		// how far through the hashes it has walked, and counting fingerprints
+		// written cannot say that when most of what is walked is already there or
+		// left behind on purpose.
+		Long lastHash = lastHash();
+		if (lastHash != null) {
+			System.out.printf("> The walk ends at hash %d\n", lastHash);
+		}
+
 		long copied = 0;
 		long start = System.currentTimeMillis();
 		while (true) {
@@ -566,6 +575,23 @@ public class PanakoStorageMigration {
 			}
 		}
 		System.out.printf("> Done, %d fingerprints copied in this run\n", copied);
+	}
+
+	/**
+	 * The largest hash the store holds, or null for a store with no fingerprints
+	 * in it. Hashes are stored as integer keys, so the last key is the largest.
+	 */
+	private Long lastHash() {
+		try (Txn<ByteBuffer> txn = source.env.txnRead()) {
+			Cursor<ByteBuffer> cursor = source.fingerprints.openCursor(txn);
+			try {
+				if (!cursor.seek(SeekOp.MDB_LAST))
+					return null;
+				return Long.valueOf(cursor.key().order(ByteOrder.LITTLE_ENDIAN).getLong());
+			} finally {
+				cursor.close();
+			}
+		}
 	}
 
 	/**
