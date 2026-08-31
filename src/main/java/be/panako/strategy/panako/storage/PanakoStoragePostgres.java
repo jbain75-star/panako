@@ -165,7 +165,22 @@ public class PanakoStoragePostgres implements PanakoStorage {
 		}
 	}
 
+	/**
+	 * A connection that outlives a single command does not always survive it. A
+	 * socket error, or a thread interrupted while it waits on an answer, leaves
+	 * the driver holding a connection it has already closed, and every later
+	 * query on that thread fails for as long as the process lives. Handing back
+	 * a fresh one costs a connect on the rare occasion it happens.
+	 */
 	private Connection connection() {
+		Connection connection = connections.get();
+		try {
+			if (!connection.isClosed())
+				return connection;
+		} catch (SQLException e) {
+			// A connection that cannot say whether it is closed is not usable.
+		}
+		connections.remove();
 		return connections.get();
 	}
 
