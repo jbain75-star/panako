@@ -112,6 +112,13 @@ public class PanakoStorageMigration {
 	 */
 	public static final long DEFAULT_BATCH_SIZE = 500_000;
 
+	/**
+	 * Written beside the identifiers a run is copying, so that a run beginning
+	 * while the source is empty is still a run that was written down. Resource
+	 * identifiers are never negative.
+	 */
+	private static final long MARK = -1;
+
 	private final PanakoStorageKV source;
 	private final PanakoStoragePostgres target;
 	private final long batchSize;
@@ -829,6 +836,9 @@ public class PanakoStorageMigration {
 			connection.setAutoCommit(false);
 			try (Statement statement = connection.createStatement()) {
 				statement.execute("TRUNCATE panako_migration_run_resource");
+				// A run over an empty source has to be readable as a run all the same,
+				// or an arrival before it verifies is taken for work it never did.
+				statement.execute("INSERT INTO panako_migration_run_resource (resource_id) VALUES (" + MARK + ")");
 			}
 			try (PreparedStatement statement = connection
 					.prepareStatement("INSERT INTO panako_migration_run_resource (resource_id) VALUES (?)")) {
@@ -859,20 +869,28 @@ public class PanakoStorageMigration {
 
 	/**
 	 * Read the files the run in progress is copying, leaving {@link #runResources}
-	 * null when there are none written down: a store copied before runs were
-	 * written down, where the source as it is now is the only list there is.
+	 * null only when no run was written down at all: a store copied before runs
+	 * were written down, where the source as it is now is the only list there is. A
+	 * run that began while the source was empty has an empty list, which is a
+	 * different thing and is why the mark is written beside the identifiers.
 	 */
 	private void readRunResources(Connection connection) {
 		Set<Integer> resources = new HashSet<Integer>();
+		boolean recorded = false;
 		try (Statement statement = connection.createStatement();
 				ResultSet result = statement.executeQuery("SELECT resource_id FROM panako_migration_run_resource")) {
 			while (result.next()) {
-				resources.add(Integer.valueOf((int) result.getLong(1)));
+				long resourceID = result.getLong(1);
+				if (resourceID == MARK) {
+					recorded = true;
+				} else {
+					resources.add(Integer.valueOf((int) resourceID));
+				}
 			}
 		} catch (SQLException e) {
 			throw new RuntimeException("Could not read the files this run copies", e);
 		}
-		runResources = resources.isEmpty() ? null : resources;
+		runResources = recorded || !resources.isEmpty() ? resources : null;
 	}
 
 	/** Write down that the walk has met the last hash. */
