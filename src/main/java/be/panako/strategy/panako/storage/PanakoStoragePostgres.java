@@ -108,6 +108,12 @@ public class PanakoStoragePostgres implements PanakoStorage {
 	private final Map<Long, List<long[]>> deleteQueue;
 	private final Map<Long, List<Long>> queryQueue;
 
+	/** How many queried hashes are asked for in one round trip. */
+	private static final int QUERY_CHUNK_SIZE = 2_000;
+
+	/** How many rows the driver holds at a time while reading an answer. */
+	private static final int QUERY_FETCH_SIZE = 10_000;
+
 	/**
 	 * Create a new storage instance and make sure the schema exists.
 	 */
@@ -428,37 +434,51 @@ public class PanakoStoragePostgres implements PanakoStorage {
 
 		Connection connection = connection();
 		try {
-			Long[] hashes = queue.toArray(new Long[0]);
-			Array hashArray = connection.createArrayOf("bigint", hashes);
-			try (PreparedStatement statement = connection.prepareStatement(sql)) {
-				statement.setArray(1, hashArray);
-				statement.setLong(2, range);
-				statement.setLong(3, range);
-				if (!resourcesToAvoid.isEmpty()) {
-					statement.setArray(4, connection.createArrayOf("integer",
-							resourcesToAvoid.toArray(new Integer[0])));
-				}
-				try (ResultSet result = statement.executeQuery()) {
-					while (result.next()) {
-						long originalKey = result.getLong(1);
-						long fingerprintHash = result.getLong(2);
-						long resourceID = result.getInt(3);
-						long t = result.getInt(4);
-						long f = result.getInt(5);
-						if (!matchAccumulator.containsKey(originalKey))
-							matchAccumulator.put(originalKey, new ArrayList<PanakoHit>());
-						matchAccumulator.get(originalKey)
-								.add(new PanakoHit(originalKey, fingerprintHash, t, resourceID, f));
+			// A long recording asks tens of thousands of hashes at once, and each
+			// one can be answered by many rows. Asked as a single statement in
+			// auto-commit, the driver holds every row of the answer in memory
+			// before the first is read, which is what exhausts the heap on long
+			// records. A cursor needs a transaction, and the queue leaves in
+			// chunks so no one answer is unbounded.
+			connection.setAutoCommit(false);
+			for (int start = 0; start < queue.size(); start += QUERY_CHUNK_SIZE) {
+				List<Long> chunk = queue.subList(start,
+						Math.min(start + QUERY_CHUNK_SIZE, queue.size()));
+				Array hashArray = connection.createArrayOf("bigint", chunk.toArray(new Long[0]));
+				try (PreparedStatement statement = connection.prepareStatement(sql)) {
+					statement.setArray(1, hashArray);
+					statement.setLong(2, range);
+					statement.setLong(3, range);
+					if (!resourcesToAvoid.isEmpty()) {
+						statement.setArray(4, connection.createArrayOf("integer",
+								resourcesToAvoid.toArray(new Integer[0])));
+					}
+					statement.setFetchSize(QUERY_FETCH_SIZE);
+					try (ResultSet result = statement.executeQuery()) {
+						while (result.next()) {
+							long originalKey = result.getLong(1);
+							long fingerprintHash = result.getLong(2);
+							long resourceID = result.getInt(3);
+							long t = result.getInt(4);
+							long f = result.getInt(5);
+							if (!matchAccumulator.containsKey(originalKey))
+								matchAccumulator.put(originalKey, new ArrayList<PanakoHit>());
+							matchAccumulator.get(originalKey)
+									.add(new PanakoHit(originalKey, fingerprintHash, t, resourceID, f));
+						}
 					}
 				}
 			}
+			connection.commit();
 		} catch (SQLException e) {
+			rollback(connection);
 			throw new RuntimeException("Could not query fingerprints", e);
 		} finally {
 			// The hashes belong to the query that is over, answered or not. Left
 			// behind, they are asked again alongside the next query's own, and the
 			// hits they bring back belong to audio the caller is no longer holding.
 			queue.clear();
+			autoCommit(connection);
 		}
 	}
 
