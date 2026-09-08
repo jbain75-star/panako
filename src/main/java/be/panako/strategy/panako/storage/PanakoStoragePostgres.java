@@ -481,12 +481,23 @@ public class PanakoStoragePostgres implements PanakoStorage {
 
 		// The whole queue leaves as one array so a query costs a single round trip:
 		// each queried hash is joined against the hashes within range of it.
+		// The join is lateral so each hash's answer can be cut off: in an index
+		// of billions of fingerprints a hash is shared by thousands of recordings,
+		// and reading every one of them is what a query spends its time on. A
+		// hash heard in that many recordings barely tells them apart, so the
+		// rows left behind are mostly noise (see the key for what a match loses).
+		int maxHits = Config.getInt(Key.PANAKO_PG_MAX_HITS_PER_HASH);
 		String sql = "SELECT q.query_hash, f.hash, f.resource_id, f.t, f.f "
 				+ "FROM unnest(?) AS q(query_hash) "
-				+ "JOIN panako_fingerprint f ON f.hash BETWEEN q.query_hash - ? AND q.query_hash + ?";
+				+ "JOIN LATERAL (SELECT hash, resource_id, t, f FROM panako_fingerprint "
+				+ "WHERE hash BETWEEN q.query_hash - ? AND q.query_hash + ?";
 		if (!resourcesToAvoid.isEmpty()) {
-			sql += " WHERE NOT (f.resource_id = ANY(?))";
+			sql += " AND NOT (resource_id = ANY(?))";
 		}
+		if (maxHits > 0) {
+			sql += " LIMIT " + maxHits;
+		}
+		sql += ") f ON true";
 
 		Connection connection = connection();
 		try {
