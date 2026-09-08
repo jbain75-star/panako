@@ -439,6 +439,15 @@ public enum Key{
 	 * The number of fingerprints sent to PostgreSQL in a single batch.
 	 */
 	PANAKO_PG_BATCH_SIZE(2000),
+	/**
+	 * The most fingerprints a single queried hash is answered with. A hash
+	 * shared by more recordings than this tells a query little about which
+	 * one it hears, and in a large index such hashes are what a query spends
+	 * its time reading. The cut is blind, so a true match loses a share of
+	 * its score along with the noise: at 2000 a clean 30s clip kept about
+	 * 85% of its score, at 500 about half. Zero means no cap.
+	 */
+	PANAKO_PG_MAX_HITS_PER_HASH(2000),
 
 	/**
 	 * Folder to store the lmdb databese

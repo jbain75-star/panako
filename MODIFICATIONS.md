@@ -26,7 +26,16 @@ Changed by AudioScout, 2026:
   every `store` and `query` process opening the store while inserts run, that
   check waited behind every batch in flight and every batch behind it waited
   for the check — seconds of stall per partition per process start, which was
-  most of what a busy index spent its time on.
+  most of what a busy index spent its time on. A query's hashes are answered
+  through a lateral join capped at `PANAKO_PG_MAX_HITS_PER_HASH` rows each
+  (2000 by default, 0 for no cap): Panako's hash is effectively 32 bits, so an
+  index of billions of fingerprints answers an ordinary hash with thousands of
+  rows, and thirty seconds of audio came back as ten million hits — six
+  seconds in PostgreSQL and as long again on the Java side to sift them — when
+  a hash shared by that many recordings barely tells them apart. The cut is
+  blind, so a true match loses some score with the noise (about 15% at 2000
+  on a clean 30s clip, half at 500); 2000 is where the query got 2–4× faster
+  for a loss well inside the matching margin.
 - **A `migrate` command** (`be.panako.cli.Migrate`,
   `PanakoStorageMigration`) that copies an existing LMDB store into the
   PostgreSQL one. The fingerprints in LMDB are the full prints of every stored
