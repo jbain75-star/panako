@@ -20,7 +20,13 @@ Changed by AudioScout, 2026:
   (a database on localhost) that would otherwise silently take precedence.
   Fingerprints are unique per `(hash, resource_id, t, f)` and inserted with `ON
   CONFLICT DO NOTHING`, so storing the same audio again cannot double its
-  fingerprints.
+  fingerprints. Opening the store reads the catalog to see what exists and
+  only creates what is missing: `CREATE INDEX IF NOT EXISTS` takes a share
+  lock on its table before it notices the index is already there, and with
+  every `store` and `query` process opening the store while inserts run, that
+  check waited behind every batch in flight and every batch behind it waited
+  for the check — seconds of stall per partition per process start, which was
+  most of what a busy index spent its time on.
 - **A `migrate` command** (`be.panako.cli.Migrate`,
   `PanakoStorageMigration`) that copies an existing LMDB store into the
   PostgreSQL one. The fingerprints in LMDB are the full prints of every stored

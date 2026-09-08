@@ -207,7 +207,20 @@ public class PanakoStoragePostgres implements PanakoStorage {
 		if (partitions < 1) {
 			throw new RuntimeException("PANAKO_PG_PARTITIONS needs to be at least one, is " + partitions);
 		}
+		// Every process opening the store passes through here, and CREATE INDEX
+		// takes a share lock on its table before it finds out the index already
+		// exists. Under a steady stream of inserts that lock waits for every
+		// batch in flight, and every batch behind it waits for the lock, so the
+		// mere check stalled the whole partition for seconds each time a JVM
+		// started. Ask the catalog instead: reading it locks nothing, and only
+		// what is truly missing is created.
+		Set<String> present = existingRelations();
 		try (Statement statement = connection().createStatement()) {
+			if (present.contains("panako_resource") && present.contains("panako_fingerprint")
+					&& hasAllPartitions(present, partitions)) {
+				LOG.fine("PostgreSQL fingerprint schema already present");
+				return;
+			}
 			statement.execute("CREATE TABLE IF NOT EXISTS panako_resource ("
 					+ "resource_id bigint PRIMARY KEY,"
 					+ "path text NOT NULL,"
@@ -226,24 +239,67 @@ public class PanakoStoragePostgres implements PanakoStorage {
 				// The last partition takes whatever is left over, and anything above the
 				// 34 bit space, so no hash can ever fail to find a partition.
 				String to = (i == partitions - 1) ? "MAXVALUE" : Long.toString(from + step);
-				String name = String.format("panako_fingerprint_p%03d", i);
-				statement.execute(String.format(
-						"CREATE TABLE IF NOT EXISTS %s PARTITION OF panako_fingerprint "
-						+ "FOR VALUES FROM (%s) TO (%s)",
-						name, i == 0 ? "MINVALUE" : Long.toString(from), to));
+				String name = partitionName(i);
+				if (!present.contains(name)) {
+					statement.execute(String.format(
+							"CREATE TABLE IF NOT EXISTS %s PARTITION OF panako_fingerprint "
+							+ "FOR VALUES FROM (%s) TO (%s)",
+							name, i == 0 ? "MINVALUE" : Long.toString(from), to));
+				}
 				// Unique, so that storing the same audio twice cannot double its
 				// fingerprints: an identical print for the same resource conflicts and is
 				// dropped (see processStoreQueue). Leading on hash, and covering every
 				// column, it also answers a query on its own — the same shape the plain
 				// covering index had.
-				statement.execute(String.format(
-						"CREATE UNIQUE INDEX IF NOT EXISTS %s_hash_idx ON %s (hash,resource_id,t,f)",
-						name, name));
+				if (!present.contains(indexName(i))) {
+					statement.execute(String.format(
+							"CREATE UNIQUE INDEX IF NOT EXISTS %s ON %s (hash,resource_id,t,f)",
+							indexName(i), name));
+				}
 			}
 			LOG.info(String.format("PostgreSQL fingerprint store ready with %d hash partitions", partitions));
 		} catch (SQLException e) {
 			throw new RuntimeException("Could not create the PostgreSQL fingerprint schema", e);
 		}
+	}
+
+	private static String partitionName(int i) {
+		return String.format("panako_fingerprint_p%03d", i);
+	}
+
+	private static String indexName(int i) {
+		return partitionName(i) + "_hash_idx";
+	}
+
+	private static boolean hasAllPartitions(Set<String> present, int partitions) {
+		for (int i = 0; i < partitions; i++) {
+			if (!present.contains(partitionName(i)) || !present.contains(indexName(i))) {
+				return false;
+			}
+		}
+		return true;
+	}
+
+	/**
+	 * The names of the fingerprint schema's tables and indexes that exist, read
+	 * from the catalog without touching the tables themselves.
+	 */
+	private Set<String> existingRelations() {
+		Set<String> names = new HashSet<String>();
+		String sql = "SELECT c.relname FROM pg_class c "
+				+ "JOIN pg_namespace n ON n.oid = c.relnamespace "
+				+ "WHERE n.nspname = current_schema() "
+				+ "AND c.relkind IN ('r','p','i') "
+				+ "AND (c.relname = 'panako_resource' OR c.relname LIKE 'panako\\_fingerprint%')";
+		try (Statement statement = connection().createStatement();
+				ResultSet result = statement.executeQuery(sql)) {
+			while (result.next()) {
+				names.add(result.getString(1));
+			}
+		} catch (SQLException e) {
+			throw new RuntimeException("Could not read the PostgreSQL catalog", e);
+		}
+		return names;
 	}
 
 	@Override
