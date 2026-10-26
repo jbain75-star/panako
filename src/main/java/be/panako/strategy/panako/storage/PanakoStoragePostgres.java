@@ -104,6 +104,7 @@ public class PanakoStoragePostgres implements PanakoStorage {
 		}
 	};
 
+	private final boolean compact;
 	private final Map<Long, List<long[]>> storeQueue;
 	private final Map<Long, List<long[]>> deleteQueue;
 	private final Map<Long, List<Long>> queryQueue;
@@ -118,11 +119,16 @@ public class PanakoStoragePostgres implements PanakoStorage {
 	 * Create a new storage instance and make sure the schema exists.
 	 */
 	public PanakoStoragePostgres() {
+		String compactSetting = configOrEnvironment(Key.PANAKO_PG_COMPACT);
+		if (!compactSetting.equalsIgnoreCase("true") && !compactSetting.equalsIgnoreCase("false"))
+			throw new IllegalArgumentException("PANAKO_PG_COMPACT must be TRUE or FALSE");
+		compact = Boolean.parseBoolean(compactSetting);
 		storeQueue = new HashMap<Long, List<long[]>>();
 		deleteQueue = new HashMap<Long, List<long[]>>();
 		queryQueue = new HashMap<Long, List<Long>>();
 
 		createSchemaIfNeeded();
+		checkCompactSchema();
 	}
 
 	/**
@@ -199,6 +205,7 @@ public class PanakoStoragePostgres implements PanakoStorage {
 	 * @return the connection of the current thread.
 	 */
 	Connection migrationConnection() {
+		if (compact) throw new IllegalStateException("Legacy LMDB migration requires an ordinary staging database before compaction");
 		return connection();
 	}
 
@@ -263,6 +270,45 @@ public class PanakoStoragePostgres implements PanakoStorage {
 		}
 	}
 
+	private void checkCompactSchema() {
+		try (Statement statement = connection().createStatement()) {
+			boolean installed;
+			try (ResultSet r = statement.executeQuery("SELECT to_regclass('panako_fingerprint_compact_meta') IS NOT NULL")) {
+				r.next(); installed = r.getBoolean(1);
+			}
+			if (!installed) {
+				if (compact) throw new IllegalStateException("Install compact-storage.sql before enabling PANAKO_PG_COMPACT");
+				return;
+			}
+			try (ResultSet r = statement.executeQuery("SELECT version FROM panako_fingerprint_compact_meta WHERE singleton")) {
+				if (!r.next() || r.getInt(1) != 1) throw new IllegalStateException("Unsupported compact storage schema");
+			}
+			if (!compact) {
+				try (ResultSet r = statement.executeQuery("SELECT EXISTS(SELECT 1 FROM panako_fingerprint_hash_packed)")) {
+					r.next();
+					if (r.getBoolean(1)) throw new IllegalStateException("Packed fingerprints require PANAKO_PG_COMPACT=TRUE");
+				}
+			} else {
+				// Resolve both views now; never turn an unavailable store into an empty answer.
+				statement.executeQuery("SELECT * FROM panako_fingerprint_search LIMIT 0").close();
+				statement.executeQuery("SELECT * FROM panako_fingerprint_by_resource LIMIT 0").close();
+				try (ResultSet r = statement.executeQuery("SELECT to_regprocedure('panako_compact_hits(bigint,bigint,integer[],integer)') IS NOT NULL "
+						+ "AND to_regprocedure('panako_compact_delete_resource(integer)') IS NOT NULL "
+						+ "AND to_regprocedure('panako_compact_delete_fingerprints(bigint[],integer[],integer[],integer[])') IS NOT NULL")) {
+					r.next(); if (!r.getBoolean(1)) throw new IllegalStateException("Incomplete compact storage schema");
+				}
+			}
+		} catch (SQLException e) {
+			throw new RuntimeException("Could not validate compact fingerprint storage", e);
+		}
+	}
+
+	private void lockCompactWriter(Connection connection) throws SQLException {
+		if (compact) try (Statement statement = connection.createStatement()) {
+			statement.execute("SELECT pg_advisory_xact_lock_shared(179108082)");
+		}
+	}
+
 	private static String partitionName(int i) {
 		return String.format("panako_fingerprint_p%03d", i);
 	}
@@ -307,14 +353,23 @@ public class PanakoStoragePostgres implements PanakoStorage {
 		String sql = "INSERT INTO panako_resource (resource_id,path,duration,fingerprints) VALUES (?,?,?,?) "
 				+ "ON CONFLICT (resource_id) DO UPDATE SET path = EXCLUDED.path, "
 				+ "duration = EXCLUDED.duration, fingerprints = EXCLUDED.fingerprints";
-		try (PreparedStatement statement = connection().prepareStatement(sql)) {
-			statement.setLong(1, resourceID);
-			statement.setString(2, resourcePath);
-			statement.setFloat(3, duration);
-			statement.setInt(4, fingerprints);
-			statement.executeUpdate();
+		Connection c = connection();
+		try {
+			c.setAutoCommit(false);
+			lockCompactWriter(c);
+			try (PreparedStatement statement = c.prepareStatement(sql)) {
+				statement.setLong(1, resourceID);
+				statement.setString(2, resourcePath);
+				statement.setFloat(3, duration);
+				statement.setInt(4, fingerprints);
+				statement.executeUpdate();
+			}
+			c.commit();
 		} catch (SQLException e) {
+			rollback(c);
 			throw new RuntimeException("Could not store meta-data for resource " + resourceID, e);
+		} finally {
+			autoCommit(c);
 		}
 	}
 
@@ -341,6 +396,15 @@ public class PanakoStoragePostgres implements PanakoStorage {
 
 	@Override
 	public void deleteMetadata(long resourceID) {
+		if (compact) {
+			try (PreparedStatement statement = connection().prepareStatement("SELECT panako_compact_delete_resource(?)")) {
+				statement.setInt(1, Math.toIntExact(resourceID));
+				statement.execute();
+				return;
+			} catch (SQLException e) {
+				throw new RuntimeException("Could not delete compact resource " + resourceID, e);
+			}
+		}
 		try (PreparedStatement statement = connection()
 				.prepareStatement("DELETE FROM panako_resource WHERE resource_id = ?")) {
 			statement.setLong(1, resourceID);
@@ -391,6 +455,7 @@ public class PanakoStoragePostgres implements PanakoStorage {
 		Connection connection = connection();
 		try {
 			connection.setAutoCommit(false);
+			lockCompactWriter(connection);
 			try (PreparedStatement statement = connection.prepareStatement(sql)) {
 				int inBatch = 0;
 				for (long[] data : queue) {
@@ -430,6 +495,10 @@ public class PanakoStoragePostgres implements PanakoStorage {
 		if (queue == null)
 			return;
 
+		if (compact) {
+			deleteCompactQueue(queue);
+			return;
+		}
 		String sql = "DELETE FROM panako_fingerprint WHERE hash = ? AND resource_id = ? AND t = ? AND f = ?";
 		int batchSize = Config.getInt(Key.PANAKO_PG_BATCH_SIZE);
 		Connection connection = connection();
@@ -456,6 +525,34 @@ public class PanakoStoragePostgres implements PanakoStorage {
 			throw new RuntimeException("Could not delete fingerprints", e);
 		} finally {
 			autoCommit(connection);
+		}
+	}
+
+	private void deleteCompactQueue(List<long[]> queue) {
+		Connection c = connection();
+		Array[] arrays = new Array[4];
+		try {
+			c.setAutoCommit(false);
+			Long[] hashes = new Long[queue.size()];
+			Integer[][] values = new Integer[3][queue.size()];
+			for (int i = 0; i < queue.size(); i++) {
+				hashes[i] = queue.get(i)[0];
+				for (int j = 0; j < 3; j++) values[j][i] = (int) queue.get(i)[j + 1];
+			}
+			arrays[0] = c.createArrayOf("bigint", hashes);
+			for (int j = 0; j < 3; j++) arrays[j + 1] = c.createArrayOf("integer", values[j]);
+			try (PreparedStatement statement = c.prepareStatement("SELECT panako_compact_delete_fingerprints(?,?,?,?)")) {
+				for (int j = 0; j < 4; j++) statement.setArray(j + 1, arrays[j]);
+				statement.execute();
+			}
+			c.commit();
+			queue.clear();
+		} catch (SQLException e) {
+			rollback(c);
+			throw new RuntimeException("Could not delete compact fingerprints", e);
+		} finally {
+			for (Array array : arrays) if (array != null) try { array.free(); } catch (SQLException ignored) { }
+			autoCommit(c);
 		}
 	}
 
@@ -487,17 +584,19 @@ public class PanakoStoragePostgres implements PanakoStorage {
 		// hash heard in that many recordings barely tells them apart, so the
 		// rows left behind are mostly noise (see the key for what a match loses).
 		int maxHits = Config.getInt(Key.PANAKO_PG_MAX_HITS_PER_HASH);
-		String sql = "SELECT q.query_hash, f.hash, f.resource_id, f.t, f.f "
-				+ "FROM unnest(?) AS q(query_hash) "
-				+ "JOIN LATERAL (SELECT hash, resource_id, t, f FROM panako_fingerprint "
-				+ "WHERE hash BETWEEN q.query_hash - ? AND q.query_hash + ?";
-		if (!resourcesToAvoid.isEmpty()) {
-			sql += " AND NOT (resource_id = ANY(?))";
+		String sql;
+		if (compact) {
+			sql = "SELECT q.query_hash,f.hash,f.resource_id,f.t,f.f FROM unnest(?) q(query_hash) "
+					+ "JOIN LATERAL panako_compact_hits(q.query_hash - ?, q.query_hash + ?, ?, ?) f ON true";
+		} else {
+			sql = "SELECT q.query_hash, f.hash, f.resource_id, f.t, f.f "
+					+ "FROM unnest(?) AS q(query_hash) "
+					+ "JOIN LATERAL (SELECT hash, resource_id, t, f FROM panako_fingerprint "
+					+ "WHERE hash BETWEEN q.query_hash - ? AND q.query_hash + ?";
+			if (!resourcesToAvoid.isEmpty()) sql += " AND NOT (resource_id = ANY(?))";
+			if (maxHits > 0) sql += " LIMIT " + maxHits;
+			sql += ") f ON true";
 		}
-		if (maxHits > 0) {
-			sql += " LIMIT " + maxHits;
-		}
-		sql += ") f ON true";
 
 		Connection connection = connection();
 		try {
@@ -516,10 +615,11 @@ public class PanakoStoragePostgres implements PanakoStorage {
 					statement.setArray(1, hashArray);
 					statement.setLong(2, range);
 					statement.setLong(3, range);
-					if (!resourcesToAvoid.isEmpty()) {
+					if (compact || !resourcesToAvoid.isEmpty()) {
 						statement.setArray(4, connection.createArrayOf("integer",
 								resourcesToAvoid.toArray(new Integer[0])));
 					}
+					if (compact) statement.setInt(5, maxHits);
 					statement.setFetchSize(QUERY_FETCH_SIZE);
 					try (ResultSet result = statement.executeQuery()) {
 						while (result.next()) {
@@ -576,6 +676,10 @@ public class PanakoStoragePostgres implements PanakoStorage {
 					if (result.next())
 						tableBytes = result.getLong(1);
 				}
+				if (compact) try (ResultSet packed = statement.executeQuery(
+						"SELECT pg_total_relation_size('panako_fingerprint_hash_packed') + pg_total_relation_size('panako_fingerprint_resource_packed')")) {
+					packed.next(); tableBytes += packed.getLong(1);
+				}
 				System.out.printf("[POSTGRES INDEX statistics]\n");
 				System.out.printf("=========================\n");
 				System.out.printf("> Hash partitions:              %d\n", Config.getInt(Key.PANAKO_PG_PARTITIONS));
@@ -603,12 +707,23 @@ public class PanakoStoragePostgres implements PanakoStorage {
 
 	@Override
 	public void clear() {
-		try (Statement statement = connection().createStatement()) {
-			statement.execute("TRUNCATE panako_fingerprint");
-			statement.execute("TRUNCATE panako_resource");
+		Connection c = connection();
+		try {
+			c.setAutoCommit(false);
+			try (Statement statement = c.createStatement()) {
+				if (compact) {
+					statement.execute("SELECT pg_advisory_xact_lock(179108082)");
+					statement.execute("TRUNCATE panako_fingerprint_hash_packed,panako_fingerprint_resource_packed");
+				}
+				statement.execute("TRUNCATE panako_fingerprint,panako_resource");
+			}
+			c.commit();
 			System.out.println("Cleared the PostgreSQL fingerprint store");
 		} catch (SQLException e) {
+			rollback(c);
 			throw new RuntimeException("Could not clear the fingerprint store", e);
+		} finally {
+			autoCommit(c);
 		}
 	}
 
