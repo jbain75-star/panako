@@ -439,6 +439,8 @@ public enum Key{
 	 * The number of fingerprints sent to PostgreSQL in a single batch.
 	 */
 	PANAKO_PG_BATCH_SIZE(2000),
+	/** Opt in only after installing sql/compact-storage.sql version 1. */
+	PANAKO_PG_COMPACT("FALSE"),
 	/**
 	 * The most fingerprints a single queried hash is answered with. A hash
 	 * shared by more recordings than this tells a query little about which

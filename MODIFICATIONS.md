@@ -36,6 +36,22 @@ Changed by AudioScout, 2026:
   blind, so a true match loses some score with the noise (about 15% at 2000
   on a clean 30s clip, half at 500); 2000 is where the query got 2–4× faster
   for a loss well inside the matching margin.
+- **Opt-in compact PostgreSQL storage** (`PANAKO_PG_COMPACT=TRUE`, default
+  false), with the complete AGPL schema and migration functions in
+  `sql/compact-storage.sql`. Fingerprints retain all four integer fields.
+  Packed arrays share row/index overhead by hash and by resource; the ordinary
+  partitioned table remains the concurrent write buffer. Lookups deduplicate
+  the two stores before the existing cap, exclude requested resources before
+  that cap, and stop reading a common hash after enough eligible hits. Results
+  use stable `(hash, resource_id, t, f)` order. This can change the old query's
+  unspecified ordering and tie-sensitive match scores without removing stored
+  fingerprints. Mutations and compaction coordinate with transaction advisory
+  locks; exact deletion, full-resource deletion and clear cover both stores.
+  A missing schema or disabled compact flag on a packed database fails closed.
+  Legacy LMDB migration requires an ordinary staging database first. Installation
+  and offline partition conversion are explicit; production startup never
+  converts existing rows. `CompactStorageCheck.java` is a standalone PostgreSQL
+  integration check. See `sql/README.md` for operation and validation limits.
 - **A `migrate` command** (`be.panako.cli.Migrate`,
   `PanakoStorageMigration`) that copies an existing LMDB store into the
   PostgreSQL one. The fingerprints in LMDB are the full prints of every stored
