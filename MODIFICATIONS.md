@@ -7,6 +7,16 @@ published here to satisfy that licence.
 
 Changed by AudioScout, 2026:
 
+- **Query-local matching cleanup**, based on pinned revision `54d35cf4`:
+  lazily cache numeric settings for one query, hoist repeated fingerprint and
+  recording-group lookups, use primitive integer comparators, avoid redundant
+  mode-counter lookups without changing its HashMap order, and replace the
+  coverage histogram with a set because only its cardinality is consumed.
+  Storage, hit multiplicity, stable sorting, mode ties and score calculations
+  are unchanged. `QueryCleanupTest` and standalone `QueryCleanupCheck` compile
+  the working query methods against synthetic storage and compare 486 fixtures
+  with the frozen pinned baseline, including ordered results and raw double
+  bits. They also cover query-local configuration lifetime and error behavior.
 - **A PostgreSQL fingerprint store** (`PanakoStoragePostgres`), selected with
   `PANAKO_STORAGE=PG`. Fingerprints live in a hash-range partitioned table
   rather than in LMDB, so concurrent `store` processes are not serialised
