@@ -42,7 +42,9 @@ import java.io.IOException;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Comparator;
+import java.util.EnumMap;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -250,9 +252,38 @@ public class PanakoStrategy extends Strategy {
 		return t * (timeResolution/sampleRate) + latency/(float) sampleRate;
 	}
 	
-	private float binToHz(int f) {
-		float minFreq = Config.getFloat(Key.PANAKO_TRANSF_MIN_FREQ);
-		float binsPerOctave = Config.getFloat(Key.PANAKO_TRANSF_BANDS_PER_OCTAVE);
+	private static class QueryConfig {
+		private final EnumMap<Key,Float> floats = new EnumMap<>(Key.class);
+		private final EnumMap<Key,Integer> ints = new EnumMap<>(Key.class);
+
+		float getFloat(Key key) {
+			Float value = floats.get(key);
+			if(value == null) {
+				value = Config.getFloat(key);
+				floats.put(key, value);
+			}
+			return value;
+		}
+
+		int getInt(Key key) {
+			Integer value = ints.get(key);
+			if(value == null) {
+				value = Config.getInt(key);
+				ints.put(key, value);
+			}
+			return value;
+		}
+	}
+
+	private float blocksToSeconds(int t, QueryConfig config) {
+		float timeResolution = config.getFloat(Key.PANAKO_TRANSF_TIME_RESOLUTION);
+		float sampleRate = config.getFloat(Key.PANAKO_SAMPLE_RATE);
+		return t * (timeResolution/sampleRate) + latency/(float) sampleRate;
+	}
+
+	private float binToHz(int f, QueryConfig config) {
+		float minFreq = config.getFloat(Key.PANAKO_TRANSF_MIN_FREQ);
+		float binsPerOctave = config.getFloat(Key.PANAKO_TRANSF_BANDS_PER_OCTAVE);
 		float centsPerBin = 1200.0f / binsPerOctave;
 		
 		float diffFromMinFreqInCents = f * centsPerBin;
@@ -266,9 +297,8 @@ public class PanakoStrategy extends Strategy {
 		Map<Integer,Integer> countPerDiff = new HashMap<>();
 		hitList.forEach((hit)->{
 			int deltaT = hit.deltaT();
-			if(!countPerDiff.containsKey(deltaT))
-				countPerDiff.put(deltaT, 0);
-			countPerDiff.put(deltaT, countPerDiff.get(deltaT)+1);
+			Integer count = countPerDiff.get(deltaT);
+			countPerDiff.put(deltaT, count == null ? 1 : count + 1);
 		});
 		
 		int maxCount = 0;
@@ -290,6 +320,7 @@ public class PanakoStrategy extends Strategy {
 
 	private void query(String query, int maxNumberOfResults, Set<Integer> avoid, QueryResultHandler handler, double startTimeOffset,double numberOfSeconds ) {
 		
+		final QueryConfig config = new QueryConfig();
 		final String queryPath ;
 		List<PanakoFingerprint> prints;
 		if(numberOfSeconds != MAX_TIME) {
@@ -315,7 +346,7 @@ public class PanakoStrategy extends Strategy {
 		Map<Long,List<PanakoHit>> matchAccumulator = new HashMap<>();
 		
 		StopWatch w = new StopWatch();
-		int queryRange = Config.getInt(Key.PANAKO_QUERY_RANGE);
+		int queryRange = config.getInt(Key.PANAKO_QUERY_RANGE);
 		db.processQueryQueue(matchAccumulator,queryRange , avoid);
 		
 
@@ -325,31 +356,34 @@ public class PanakoStrategy extends Strategy {
 
 		 matchAccumulator.forEach((fingerprintHash, dbHits) -> {
 
+			 PanakoFingerprint print = printMap.get(fingerprintHash);
 			 dbHits.forEach((dbHit)->{
 				//long matchingHash  = data[0];
 				 int identifier = dbHit.resourceID;
 				 int matchTime = dbHit.t;
-				 if(!hitsPerIdentifer.containsKey(identifier)){
-					hitsPerIdentifer.put(identifier, new ArrayList<PanakoMatch>());
+				 List<PanakoMatch> group = hitsPerIdentifer.get(identifier);
+				 if(group == null){
+					group = new ArrayList<>();
+					hitsPerIdentifer.put(identifier, group);
 				 }
 				 PanakoMatch hit = new PanakoMatch();
 				 hit.identifier = identifier;
 				 hit.matchTime = matchTime;
 				 hit.originalHash = dbHit.originalHash;
 				 hit.matchedNearHash = dbHit.matchedNearHash;
-				 hit.queryTime = printMap.get(fingerprintHash).t1;
+				 hit.queryTime = print.t1;
 				 
-				 hit.queryF1 = printMap.get(fingerprintHash).f1;
+				 hit.queryF1 = print.f1;
 				 hit.matchF1 = dbHit.f;
 				 
-				 hitsPerIdentifer.get(identifier).add(hit);
+				 group.add(hit);
 			 });
 		 });
 
 		 LOG.info(String.format("Query for %d prints, %d matches in %s \n", printMap.size(),matchAccumulator.size(), w.formattedToString()));
 
-		 int minimumUnfilteredHits = Config.getInt(Key.PANAKO_MIN_HITS_UNFILTERED);
-		 int minimumFilteredHits = Config.getInt(Key.PANAKO_MIN_HITS_FILTERED);
+		 int minimumUnfilteredHits = config.getInt(Key.PANAKO_MIN_HITS_UNFILTERED);
+		 int minimumFilteredHits = config.getInt(Key.PANAKO_MIN_HITS_FILTERED);
 		 
 		 List<Integer> matchesToDelete = new ArrayList<>();
 		 hitsPerIdentifer.forEach((identifier, hitlist) -> {
@@ -365,11 +399,11 @@ public class PanakoStrategy extends Strategy {
 		 hitsPerIdentifer.forEach((identifier, hitlist) -> {
 			 
 			 //sort by query time
-			 Collections.sort(hitlist, (Comparator<? super PanakoMatch>) (PanakoMatch a, PanakoMatch b) -> Integer.valueOf(a.queryTime).compareTo(Integer.valueOf(b.queryTime)));
+			 Collections.sort(hitlist, (Comparator<? super PanakoMatch>) (PanakoMatch a, PanakoMatch b) -> Integer.compare(a.queryTime, b.queryTime));
 			
 			 //view the first and last hits (max 250)
-			 int maxPartListSize = Config.getInt(Key.PANAKO_HIT_PART_MAX_SIZE);
-			 int partDivider = Config.getInt(Key.PANAKO_HIT_PART_DIVIDER);
+			 int maxPartListSize = config.getInt(Key.PANAKO_HIT_PART_MAX_SIZE);
+			 int partDivider = config.getInt(Key.PANAKO_HIT_PART_DIVIDER);
 			 int partListLength = Math.min(maxPartListSize,Math.max(minimumUnfilteredHits,hitlist.size()/partDivider));
 			 List<PanakoMatch> firstHits = hitlist.subList(0, partListLength);
 			 List<PanakoMatch> lastHits  = hitlist.subList(hitlist.size() - partListLength, hitlist.size());
@@ -383,7 +417,7 @@ public class PanakoStrategy extends Strategy {
 				 int diff = hit.deltaT();
 				 if(diff == y1) {
 					 x1 = hit.queryTime;
-					 frequencyFactor = binToHz(hit.matchF1) / binToHz(hit.queryF1);
+					 frequencyFactor = binToHz(hit.matchF1, config) / binToHz(hit.queryF1, config);
 					 break;
 				 }
 			 }
@@ -407,11 +441,11 @@ public class PanakoStrategy extends Strategy {
 			 //System.out.printf("slope %f offset %f  timefactor %f  freqfactor %f \n",slope,offset,timeFactor,frequencyFactor);
 			 
 			 //threshold in time bins
-			 double threshold = Config.getFloat(Key.PANAKO_QUERY_RANGE);
+			 double threshold = config.getFloat(Key.PANAKO_QUERY_RANGE);
 			 
 			 //only continue processing when time factor is reasonable
-			 if(timeFactor > Config.getFloat(Key.PANAKO_MIN_TIME_FACTOR) && timeFactor < Config.getFloat(Key.PANAKO_MAX_TIME_FACTOR) && 
-					 frequencyFactor> Config.getFloat(Key.PANAKO_MIN_FREQ_FACTOR) &&  frequencyFactor < Config.getFloat(Key.PANAKO_MAX_FREQ_FACTOR)	 ) {
+			 if(timeFactor > config.getFloat(Key.PANAKO_MIN_TIME_FACTOR) && timeFactor < config.getFloat(Key.PANAKO_MAX_TIME_FACTOR) &&
+					 frequencyFactor> config.getFloat(Key.PANAKO_MIN_FREQ_FACTOR) &&  frequencyFactor < config.getFloat(Key.PANAKO_MAX_FREQ_FACTOR)	 ) {
 				 List<PanakoMatch> filteredHits = new ArrayList<>();
 				 
 				 hitlist.forEach( hit ->{				 
@@ -434,17 +468,17 @@ public class PanakoStrategy extends Strategy {
 				 if(filteredHits.size() > minimumFilteredHits) {
 					 //System.out.println("Matches " + identifier + " matches filtered hits: " + filteredHits.size());
 					 
-					 float minDuration = Config.getFloat(Key.PANAKO_MIN_MATCH_DURATION);
-					 float queryStart = blocksToSeconds(filteredHits.get(0).queryTime);
-					 float queryStop = blocksToSeconds(filteredHits.get(filteredHits.size()-1).queryTime);
+					 float minDuration = config.getFloat(Key.PANAKO_MIN_MATCH_DURATION);
+					 float queryStart = blocksToSeconds(filteredHits.get(0).queryTime, config);
+					 float queryStop = blocksToSeconds(filteredHits.get(filteredHits.size()-1).queryTime, config);
 					 float duration = queryStop - queryStart;
 					 
 					 if(duration >= minDuration) {
 						 int score = filteredHits.size();
 						
 						 
-						 float refStart = blocksToSeconds(filteredHits.get(0).matchTime);
-						 float refStop =  blocksToSeconds(filteredHits.get(filteredHits.size()-1).matchTime);
+						 float refStart = blocksToSeconds(filteredHits.get(0).matchTime, config);
+						 float refStop =  blocksToSeconds(filteredHits.get(filteredHits.size()-1).matchTime, config);
 						 
 						 //retrieve meta-data
 						 PanakoResourceMetadata metadata = db.getMetadata((long) identifier);
@@ -455,15 +489,13 @@ public class PanakoStrategy extends Strategy {
 						 //Construct a histogram with the number of matches for each second
 						 //Ideally there is a more or less equal number of matches each second
 						 // note that the last second might not be a full second
-						 TreeMap<Integer,Integer> matchesPerSecondHistogram = new TreeMap<>();
+						 Set<Integer> matchesPerSecondHistogram = new HashSet<>();
 						 for(PanakoMatch hit : filteredHits) {
 							 //if(hit.identifier!= FileUtils.getIdentifier(queryPath))
 								 //System.out.printf("%d %d %d %d %d\n", hit.identifier, hit.matchTime, hit.queryTime, hit.originalHash, hit.matchedNearHash);
-							 float offsetInSec = blocksToSeconds(hit.matchTime) - refStart;
+							 float offsetInSec = blocksToSeconds(hit.matchTime, config) - refStart;
 							 int secondBin = (int) offsetInSec;
-							 if(!matchesPerSecondHistogram.containsKey(secondBin))
-								 matchesPerSecondHistogram.put(secondBin, 0);
-							 matchesPerSecondHistogram.put(secondBin, matchesPerSecondHistogram.get(secondBin)+1);
+							 matchesPerSecondHistogram.add(secondBin);
 						 }
 						
 						 //number of seconds bins
@@ -471,7 +503,7 @@ public class PanakoStrategy extends Strategy {
 						 float emptySeconds = numberOfMatchingSeconds - matchesPerSecondHistogram.size();
 						 float percentOfSecondsWithMatches = 1 - (emptySeconds / numberOfMatchingSeconds);
 
-						 if(percentOfSecondsWithMatches >= Config.getFloat(Key.PANAKO_MIN_SEC_WITH_MATCH)){
+						 if(percentOfSecondsWithMatches >= config.getFloat(Key.PANAKO_MIN_SEC_WITH_MATCH)){
 						 	QueryResult r = new QueryResult(queryPath,queryStart, queryStop, refPath, "" + identifier, refStart, refStop,  score, timeFactor, frequencyFactor,percentOfSecondsWithMatches);
 						 	queryResults.add(r);
 						 }
@@ -484,7 +516,7 @@ public class PanakoStrategy extends Strategy {
 			 handler.handleEmptyResult(QueryResult.emptyQueryResult(queryPath,0,0));
 		 }else {
 			 //sort results by score desc
-			 queryResults.sort((Comparator<? super QueryResult>) (QueryResult a, QueryResult b) -> Integer.valueOf((int) b.score).compareTo(Integer.valueOf((int) a.score)));
+			 queryResults.sort((Comparator<? super QueryResult>) (QueryResult a, QueryResult b) -> Integer.compare((int) b.score, (int) a.score));
 			 //limit results to max number of results, if needed
 			 List<QueryResult> finalResults = queryResults;
 			 if(queryResults.size()>maxNumberOfResults) {

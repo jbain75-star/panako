@@ -1,0 +1,375 @@
+// Derived from Panako, copyright (C) 2014-2022 Joren Six / IPEM (AGPL-3.0).
+// Pitch conversion is a mathematical test double, not a vendored DSP implementation.
+// Query baseline: Panako 54d35cf4c1a887cded153dce97eb65c2afabb2bf.
+import java.util.*;import java.lang.management.*;import java.nio.file.*;import java.security.*;import java.nio.charset.*;
+public class QueryReplay {
+enum Key {PANAKO_HIT_PART_DIVIDER("2"),PANAKO_HIT_PART_MAX_SIZE("2147483647"),PANAKO_MAX_FREQ_FACTOR("1.2"),PANAKO_MAX_TIME_FACTOR("1.2"),PANAKO_MIN_FREQ_FACTOR("0.8"),PANAKO_MIN_HITS_FILTERED("5"),PANAKO_MIN_HITS_UNFILTERED("10"),PANAKO_MIN_MATCH_DURATION("5"),PANAKO_MIN_SEC_WITH_MATCH("0.2"),PANAKO_MIN_TIME_FACTOR("0.8"),PANAKO_QUERY_RANGE("2"),PANAKO_SAMPLE_RATE("16000"),PANAKO_TRANSF_BANDS_PER_OCTAVE("85"),PANAKO_TRANSF_MIN_FREQ("110"),PANAKO_TRANSF_TIME_RESOLUTION("128");final String value;Key(String v){value=v;}String getDefaultValue(){return value;}}
+static class Config {static final HashMap<Key,String> store=new HashMap<>();static{for(Key k:Key.values())store.put(k,k.getDefaultValue());}static String get(Key k){if(store.get(k)!=null)return store.get(k).trim();return k.getDefaultValue();}static float getFloat(Key k){return Float.parseFloat(get(k));}static int getInt(Key k){return Integer.parseInt(get(k));}}
+static class QueryResult {
+
+    /**
+     * The path of the query
+     */
+    public final String queryPath;
+    /**
+     * The start of the match in the query, in seconds.
+     */
+    public final double queryStart;
+    /**
+     * The end of the match in the query, in seconds.
+     */
+    public final double queryStop;
+
+    //ref info
+    /**
+     * The internal identifier of the matching audio
+     */
+    public final String refIdentifier;
+    /**
+     * The path of the matching audio
+     */
+    public final String refPath;
+    /**
+     * The start of the match in the reference audio, in seconds.
+     */
+    public final double refStart;
+    /**
+     * The end of the match in the reference audio, in seconds.
+     */
+    public final double refStop;
+
+    //match info
+    /**
+     * The start of the match in the reference audio, in seconds.
+     */
+    public final double score;
+    /**
+     * The amount of time stretching that needs to be applied to the query to match the reference audio.
+     *
+     */
+    public final double timeFactor;
+    /**
+     * The amount of pitch shifting that needs to be applied to the query to match the reference audio.
+     * A percentage which is expected to be between 0.8 and 1.2
+     */
+    public final double frequencyFactor;
+    /**
+     * If the match has a duration of 10 seconds but only the first and last second contain all the matches,
+     * this indicates an unreliable match. 2/10 = 0.2 would be the percentage.
+     * If all seconds also have matches then it is 1.0.
+     */
+    public final double percentOfSecondsWithMatches;
+
+    /**
+     * Create a new query result data class.
+     *
+     * @param queryPath
+     *            The path of a query
+     * @param queryStart
+     *            The start time offset in the query. The match is found at
+     *            <code>queryTimeOffsetStart+time</code>.
+     * @param queryStop
+     *            The stop time offset of the query.
+     * @param refPath
+     *            The path of the reference stored in the database.
+     * @param refIdentifier
+     *            The internal identifier of the matched audio
+     * @param score
+     *            The score for the match
+     * @param refStart
+     *            The starting position in the matched audio, in seconds.
+     * @param refStop
+     *            The stopping position in the matched audio, in seconds.
+     * @param timeFactor
+     *            The factor (percentage) of change in time. 110 means 10%
+     *            speedup compared to the reference. 90 means 10% slower than
+     *            reference.
+     * @param frequencyFactor
+     *            The factor (percentage) of change in frequency. 110 means 10%
+     *            higher frequency compared to the reference. 90 means a 10%
+     *            lower frequency.
+     * @param percentOfSecondsWithMatches
+     *            If the match has a duration of 10 seconds but only the first and last second contain all the matches,
+     *            this indicates an unreliable match. 2/10 = 0.2 would be the percentage.
+     *            If all seconds also have matches then it is 1.0.
+     */
+    public QueryResult(String queryPath,
+                       double queryStart,
+                       double queryStop,
+                       String refPath,
+                       String refIdentifier,
+                       double refStart,
+                       double refStop,
+                       double score,
+                       double timeFactor,
+                       double frequencyFactor,
+                       double percentOfSecondsWithMatches){
+        this.queryPath = queryPath;
+        this.queryStart = queryStart;
+        this.queryStop = queryStop;
+
+        this.refPath = refPath;
+        this.refIdentifier = refIdentifier;
+        this.refStart = refStart;
+        this.refStop = refStop;
+
+        this.score = score;
+        this.timeFactor=timeFactor;
+        this.frequencyFactor = frequencyFactor;
+
+        this.percentOfSecondsWithMatches = percentOfSecondsWithMatches;
+    }
+
+    /**
+     * Create a new query result indicating an empty match.
+     * @param query The query
+     * @param queryStart  The start time offset in the query. The match is found at <code>queryTimeOffsetStart+time</code>.
+     * @param queryStop The stop time offset of the query.
+     * @return  An empty query result.
+     */
+    public static QueryResult emptyQueryResult(String query,double queryStart,double queryStop){
+        return new QueryResult(query,queryStart,queryStop,null, null, -1, -1,-1,-1,-1,0);
+    }
+}
+
+static class PanakoMatch {
+
+    /**
+     * Initialize an empty match
+     */
+    public PanakoMatch(){}
+
+    /**
+     * The hash found in the reference database, near the extracted hash
+     */
+    public long matchedNearHash;
+
+    /**
+     * The extracted hash
+     */
+    public long originalHash;
+
+    /**
+     * The match audio identifier
+     */
+    public int identifier;
+
+    /**
+     * Time in blocks in the original, matched audio.
+     */
+    public int matchTime;
+
+    /**
+     * Time in blocks in the query.
+     */
+    public int queryTime;
+
+    /**
+     * Frequency bin in the original, matched audio.
+     */
+    public int matchF1;
+
+    /**
+     * Frequency bin the query.
+     */
+    public int queryF1;
+
+    /**
+     * Calculates the difference between
+     * the time of the found matching fingerprint and the extracted
+     * fingerprint.
+     * @return The time difference between query and reference
+     */
+    public int deltaT() {
+        return matchTime - queryTime;
+    }
+
+    public String toString() {
+        return String.format("%d %d %d %d", identifier, matchTime, queryTime, deltaT());
+    }
+}
+
+static class PanakoHit{
+    /**
+     * The fingerprint hash that was used in the query
+     */
+    public final long originalHash;
+
+    /**
+     * The near fingerprint hash found in the reference database
+     */
+    public final long matchedNearHash;
+
+    /**
+     * The time index in the
+     */
+    public final int t;
+
+    /**
+     * The frequency index at the matching location
+     */
+    public final int f;
+
+    /**
+     * The internal resource identifier
+     */
+    public final int resourceID;
+
+    /**
+     * Create a new hit between an extracted hash and a matched
+     * near hash in the reference database
+     * @param originalHash The original extracted hash from the query
+     * @param matchedNearHash The matched hash in the reference database.
+     * @param t The time component of the fingerprint in the ref database.
+     * @param resourceID The resource identifier connected to the fingerprint in the ref database.
+     * @param f The frequency component of the fingerprint in the ref database.
+     */
+    public PanakoHit(long originalHash, long matchedNearHash,long t, long resourceID, long f) {
+        this.originalHash = originalHash;
+        this.matchedNearHash = matchedNearHash;
+        this.t=(int)t;
+        this.f =(int)f;
+        this.resourceID=(int)resourceID;
+    }
+
+}
+
+static class PanakoResourceMetadata {
+
+    /**
+     * Create a new empty meta data instance
+     */
+    public PanakoResourceMetadata(){}
+
+
+
+    /**
+     * The total amount of fingerprints extracted
+     */
+    public int numFingerprints;
+
+    /**
+     * The duration in seconds
+     */
+    public double duration;
+    /**
+     *The path of the resource
+     */
+    public String path;
+
+    /**
+     * The internal resource identifier
+     */
+    public long identifier;
+
+    /**
+     * Calculates the number of fingerprints for each second.
+     * @return The number of fingerprints per second
+     */
+    public double printsPerSecond() {
+        return numFingerprints / duration;
+    }
+}
+
+static final class PitchConverter {
+ private static final double REFERENCE_HZ=8.17579892;
+ private static final double LOG_TWO=Math.log(2.0);
+ static double hertzToAbsoluteCent(double hertz){
+  if(!(hertz>0))throw new IllegalArgumentException("Pitch in Hz must be positive");
+  return 1200*Math.log(hertz/REFERENCE_HZ)/LOG_TWO;
+ }
+ static double absoluteCentToHertz(double cents){return REFERENCE_HZ*Math.pow(2,cents/1200.0);}
+}
+
+static class PanakoFingerprint {long hash;int t1,f1;PanakoFingerprint(long h,int t,int f){hash=h;t1=t;f1=f;}long hash(){return hash;}}
+interface QueryResultHandler {void handleEmptyResult(QueryResult r);void handleQueryResult(QueryResult r);}
+static class StopWatch {String formattedToString(){return "offline";}}
+static class Log {void info(String x){}}
+static long hashFor(int i){long z=i+0x9e3779b97f4a7c15L;z=(z^(z>>>30))*0xbf58476d1ce4e5b9L;z=(z^(z>>>27))*0x94d049bb133111ebL;return (z^(z>>>31))&Long.MAX_VALUE;}
+static class Fixture {
+ final boolean fail;final int latency;
+ final List<PanakoFingerprint> prints=new ArrayList<>();final int[] hash,ids,t,f;final long[] near;final Set<Integer> avoid=new HashSet<>();
+ Fixture(int rows,int seed,String shape){
+ fail=shape.equals("error");latency=seed%3*4096;Random r=new Random(seed);int nh=Math.min(2000,Math.max(32,rows/10));
+ for(int i=0;i<nh;i++)prints.add(new PanakoFingerprint(hashFor(i),(i*4999/nh)/8*8,100+(i%20)));
+ if(shape.equals("duplicates"))prints.add(new PanakoFingerprint(prints.get(3).hash(),500,prints.get(3).f1));
+ if(shape.equals("extreme"))for(int i=0;i<prints.size();i++)prints.get(i).t1=i%2==0?Integer.MIN_VALUE+i:Integer.MAX_VALUE-i;
+ if(shape.equals("longbins"))for(PanakoFingerprint p:prints)p.t1*=100;
+ hash=new int[rows];ids=new int[rows];t=new int[rows];f=new int[rows];near=new long[rows];
+ for(int i=0;i<rows;i++){
+ int h=(int)((long)i*nh/Math.max(1,rows));PanakoFingerprint p=prints.get(h);hash[i]=h;
+ int id=i%257==0&&!shape.equals("noise")?1000:10000+r.nextInt(Math.max(20,rows/100));
+ if(shape.equals("dense"))id=1000+(i%10);
+ ids[i]=id;int delta=id<10000?100+id%7:r.nextInt(20000)-10000;
+ if(shape.equals("ties"))delta=(i%2==0)?1:17;
+ t[i]=p.t1+delta;f[i]=p.f1;if(shape.equals("freqedge"))f[i]+=i%4==0?23:i%4==1?-28:0;near[i]=p.hash()+(i%5)-2;
+ if(shape.equals("duplicates")&&i>0&&i%37==0){hash[i]=hash[i-1];ids[i]=ids[i-1];t[i]=t[i-1];f[i]=f[i-1];near[i]=near[i-1];}
+ }
+ if(shape.equals("avoid"))avoid.add(1000);
+ }
+}
+static class PanakoStorage {
+ final Fixture fx;PanakoStorage(Fixture f){fx=f;}
+ void addToQueryQueue(long h){}
+ void processQueryQueue(Map<Long,List<PanakoHit>> out,int range,Set<Integer> avoid){
+ for(int i=0;i<fx.ids.length;i++){if(fx.fail&&i==fx.ids.length/2)throw new IllegalStateException("synthetic cursor failure");if(avoid.contains(fx.ids[i]))continue;long key=fx.prints.get(fx.hash[i]).hash();
+ if(!out.containsKey(key))out.put(key,new ArrayList<PanakoHit>());
+ out.get(key).add(new PanakoHit(key,fx.near[i],fx.t[i],fx.ids[i],fx.f[i]));}
+ }
+ PanakoResourceMetadata getMetadata(long id){if(id%3==0)return null;PanakoResourceMetadata m=new PanakoResourceMetadata();m.path="fixture-"+id;return m;}
+}
+static class Base {
+ final double MAX_TIME=5000000d;int latency=0;Log LOG=new Log();Fixture fx;PanakoStorage db;
+ Base(Fixture f){fx=f;latency=f.latency;db=new PanakoStorage(f);}
+ List<PanakoFingerprint> toFingerprints(String p){return fx.prints;}
+ List<PanakoFingerprint> toFingerprints(String p,double s,double d){return fx.prints;}
+ PanakoStorage getStorage(){return db;}
+}
+
+/*BASELINE*/
+/*OPTIMIZED*/
+static List<String> run(String variant,Fixture f,int limit) throws Exception {
+ Base b=(Base)Class.forName("QueryReplay$"+variant).getDeclaredConstructor(Fixture.class).newInstance(f);
+ return run(b,f,limit);
+}
+static List<String> run(Base b,Fixture f,int limit) throws Exception {
+ List<String> out=new ArrayList<>();QueryResultHandler handler=new QueryResultHandler(){
+ public void handleEmptyResult(QueryResult r){handleQueryResult(r);out.set(out.size()-1,"EMPTY:"+out.get(out.size()-1));}
+ public void handleQueryResult(QueryResult r){out.add(r.refIdentifier+"|"+r.refPath+"|"+r.queryPath+"|"+bits(r.queryStart)+"|"+bits(r.queryStop)+"|"+bits(r.refStart)+"|"+bits(r.refStop)+"|"+bits(r.score)+"|"+bits(r.timeFactor)+"|"+bits(r.frequencyFactor)+"|"+bits(r.percentOfSecondsWithMatches));}};
+ b.getClass().getMethod("query",String.class,int.class,Set.class,QueryResultHandler.class,double.class,double.class).invoke(b,"fixture",limit,f.avoid,handler,0d,5000000d);return out;
+}
+static String bits(double d){return Long.toHexString(Double.doubleToRawLongBits(d));}
+static String digest(List<String> values)throws Exception{return Base64.getEncoder().encodeToString(MessageDigest.getInstance("SHA-256").digest(values.toString().getBytes(StandardCharsets.UTF_8)));}
+public static void main(String[]args)throws Exception{
+ if(args[0].equals("verify")){
+ for(String v:new String[]{"baseline","optimized"}){
+   try{run(v,new Fixture(1000,1,"error"),100);throw new AssertionError("cursor error swallowed: "+v);}
+   catch(java.lang.reflect.InvocationTargetException e){if(!(e.getCause() instanceof IllegalStateException)||!e.getCause().getMessage().equals("synthetic cursor failure"))throw e;}
+   Fixture positive=new Fixture(20000,1,"dense");
+   Base instance=(Base)Class.forName("QueryReplay$"+v).getDeclaredConstructor(Fixture.class).newInstance(positive);
+   if(run(instance,positive,100).get(0).startsWith("EMPTY"))throw new AssertionError("Positive cache fixture is empty");
+   String duration=Config.store.put(Key.PANAKO_MIN_MATCH_DURATION,"10000");
+   try{if(!run(instance,positive,100).get(0).startsWith("EMPTY"))throw new AssertionError("Configuration leaked between queries");}
+   finally{Config.store.put(Key.PANAKO_MIN_MATCH_DURATION,duration);}
+   String frequency=Config.store.put(Key.PANAKO_MIN_FREQ_FACTOR,"invalid");
+   try{
+     if(!run(v,new Fixture(0,1,"mixed"),100).get(0).startsWith("EMPTY"))throw new AssertionError("Empty fixture changed");
+     try{run(v,positive,100);throw new AssertionError("Invalid setting swallowed");}
+     catch(java.lang.reflect.InvocationTargetException e){if(!(e.getCause() instanceof NumberFormatException))throw e;}
+   }finally{Config.store.put(Key.PANAKO_MIN_FREQ_FACTOR,frequency);}
+   List<PanakoMatch> tied=new ArrayList<>();
+   for(int delta:new int[]{1,16}){PanakoMatch hit=new PanakoMatch();hit.matchTime=delta;tied.add(hit);}
+   java.lang.reflect.Method mode=instance.getClass().getDeclaredMethod("mostCommonDeltaTforHitList",List.class);mode.setAccessible(true);
+   if(!mode.invoke(instance,tied).equals(16))throw new AssertionError("HashMap mode tie order changed");
+ }
+ System.out.println("QUERY_LIFECYCLE_CHECK: PASS (same-instance configuration refresh; lazy invalid-setting errors; empty results; cursor error propagation; original HashMap tie order)");return;}
+ String v=args[0];int rows=Integer.parseInt(args[1]);int warm=Integer.parseInt(args[2]);int reps=Integer.parseInt(args[3]);Fixture f=new Fixture(rows,314159,args.length>4?args[4]:"mixed");
+ for(int i=0;i<warm;i++)run(v,f,100);
+ com.sun.management.ThreadMXBean tb=(com.sun.management.ThreadMXBean)ManagementFactory.getThreadMXBean();
+ for(int i=0;i<reps;i++){
+ long alloc=tb.getThreadAllocatedBytes(Thread.currentThread().getId()),cpu=ProcessHandle.current().info().totalCpuDuration().get().toNanos(),start=System.nanoTime();List<String> result=run(v,f,100);
+ long wall=System.nanoTime()-start;cpu=ProcessHandle.current().info().totalCpuDuration().get().toNanos()-cpu;alloc=tb.getThreadAllocatedBytes(Thread.currentThread().getId())-alloc;
+ System.out.printf(Locale.ROOT,"{\"variant\":\"%s\",\"rows\":%d,\"iteration\":%d,\"wall_ms\":%.3f,\"process_cpu_ms\":%.3f,\"allocated_mb\":%.3f,\"digest\":\"%s\"}%n",v,rows,i,wall/1e6,cpu/1e6,alloc/1048576.0,digest(result));
+ }
+}
+}

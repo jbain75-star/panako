@@ -1,0 +1,46 @@
+import java.util.*;
+
+public class QueryGolden {
+    public static void main(String[] args) throws Exception {
+        if (args.length > 0) QueryReplay.main(new String[] {"verify"});
+        List<String> all = new ArrayList<>();
+        for (String shape : new String[] {"mixed", "noise", "dense", "ties", "duplicates", "avoid", "extreme", "freqedge", "longbins"}) {
+            for (int rows : new int[] {0, 9, 19, 90, 100, 110, 1000, 20000}) {
+                for (int seed = 1; seed <= 3; seed++) {
+                    for (int limit : new int[] {1, 100}) {
+                        QueryReplay.Fixture fixture = new QueryReplay.Fixture(rows, seed, shape);
+                        List<String> expected = QueryReplay.run("baseline", fixture, limit);
+                        if (!expected.equals(QueryReplay.run("optimized", fixture, limit))) throw new AssertionError("Ordered results differ");
+                        all.add(shape + ":" + rows + ":" + seed + ":" + limit + ":" + expected);
+                    }
+                }
+            }
+        }
+        for (int seed = 1; seed <= 3; seed++) {
+            for (int limit : new int[] {1, 100}) {
+                for (int shift : new int[] {-20, 20}) {
+                    QueryReplay.Fixture f = new QueryReplay.Fixture(20000, seed, "dense");
+                    for (int i = 0; i < f.f.length; i++) f.f[i] += shift;
+                    addChecked(all, "accepted-frequency:" + seed + ":" + limit + ":" + shift, f, limit);
+                }
+                for (double scale : new double[] {0.79, 0.8, 0.81, 1, 1.19, 1.2, 1.21}) {
+                    QueryReplay.Fixture f = new QueryReplay.Fixture(5000, seed, "dense");
+                    for (int i = 0; i < f.t.length; i++) f.t[i] = (int) Math.round(f.prints.get(f.hash[i]).t1 * scale) + 100;
+                    addChecked(all, "time-factor-boundary:" + seed + ":" + limit + ":" + scale, f, limit);
+                }
+            }
+        }
+        String digest = QueryReplay.digest(all);
+        if (!digest.equals("B9Go2AXitgL7gjkTBmsBCB9RSRmmEcYNJdtWYCnveDw=")) throw new AssertionError("Pinned golden changed: " + digest);
+        System.out.println("GOLDEN_EQUIVALENCE_CHECK: PASS (486 fixtures; identical ordered results, scores and raw double bits; frozen pinned digest " + digest + ")");
+    }
+
+    static void addChecked(List<String> all, String label, QueryReplay.Fixture f, int limit) throws Exception {
+        List<String> expected = QueryReplay.run("baseline", f, limit);
+        if (label.startsWith("accepted-frequency") && expected.get(0).startsWith("EMPTY")) throw new AssertionError("Positive frequency fixture did not match");
+        for (String v : new String[] {"optimized"}) {
+            if (!expected.equals(QueryReplay.run(v, f, limit))) throw new AssertionError(label + ": " + v);
+        }
+        all.add(label + ":" + expected);
+    }
+}
