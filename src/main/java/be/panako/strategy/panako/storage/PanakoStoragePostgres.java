@@ -649,6 +649,99 @@ public class PanakoStoragePostgres implements PanakoStorage {
 		}
 	}
 
+    private static final int MAX_REFINEMENT_HASHES = 2_000;
+    private static final int MAX_REFINEMENT_ROWS = 100_000;
+    private static final int MAX_REFINEMENT_HITS = 500_000;
+
+    /** Rank independent queried hashes, not repeated hits from one beat. */
+    static List<Integer> refinementCandidates(Map<Long,List<PanakoHit>> hits,
+            int limit, Set<Integer> avoid) {
+        Map<Integer,Integer> votes = new HashMap<>();
+        Set<Integer> seen = new HashSet<>();
+        for (List<PanakoHit> group : hits.values()) {
+            seen.clear();
+            for (PanakoHit hit : group)
+                if (!avoid.contains(hit.resourceID) && seen.add(hit.resourceID))
+                    votes.merge(hit.resourceID, 1, Integer::sum);
+        }
+        List<Integer> ranked = new ArrayList<>();
+        for (Map.Entry<Integer,Integer> vote : votes.entrySet())
+            if (vote.getValue() >= 6) ranked.add(vote.getKey());
+        ranked.sort((a,b) -> {
+            int byVotes = Integer.compare(votes.get(b), votes.get(a));
+            return byVotes == 0 ? Integer.compare(a,b) : byVotes;
+        });
+        return new ArrayList<>(ranked.subList(0, Math.min(Math.max(0, Math.min(8,limit)), ranked.size())));
+    }
+
+    @Override
+    public Map<Long,List<PanakoHit>> refineQuery(List<Long> queryHashes,
+            Map<Long,List<PanakoHit>> broadHits, int range, Set<Integer> avoid) {
+        int limit = Config.getInt(Key.PANAKO_PG_REFINE_CANDIDATES);
+        // Only the compact layout has a resource-keyed fingerprint index.
+        // Keep long recordings and unusually wide searches on the existing path.
+        if (!compact || limit <= 0 || range < 0 || range > 4 || queryHashes.size() > 4_000)
+            return java.util.Collections.emptyMap();
+        Set<Long> unique = new HashSet<>(queryHashes);
+        if (unique.isEmpty() || unique.size() > MAX_REFINEMENT_HASHES)
+            return java.util.Collections.emptyMap();
+        List<Integer> candidates = refinementCandidates(broadHits, limit, avoid);
+        if (candidates.isEmpty()) return java.util.Collections.emptyMap();
+        Set<Long> neighbours = new HashSet<>();
+        for (long hash : unique) for (int d=-range; d<=range; d++) neighbours.add(hash+d);
+        // Both halves are bounded by an index: packed resources by their primary
+        // key, and recent ordinary rows by queried hash. Never scan the ordinary
+        // table by resource_id alone. UNION removes rows present in both stores.
+        String sql = "SELECT hash,resource_id,t,f FROM ("
+                + "SELECT p.hash,r.resource_id,p.t,p.f FROM panako_fingerprint_resource_packed r "
+                + "CROSS JOIN LATERAL unnest(r.hashes,r.times,r.freqs) p(hash,t,f) "
+                + "WHERE r.resource_id=ANY(?) AND p.hash=ANY(?) UNION "
+                + "SELECT hash,resource_id,t,f FROM panako_fingerprint "
+                + "WHERE hash=ANY(?) AND resource_id=ANY(?)) selected LIMIT " + (MAX_REFINEMENT_ROWS+1);
+        Connection c = connection();
+        long started = System.nanoTime();
+        try {
+            c.setAutoCommit(false);
+            Map<Long,List<long[]>> byHash = new HashMap<>();
+            Array ids = c.createArrayOf("integer", candidates.toArray(new Integer[0]));
+            Array hashes = c.createArrayOf("bigint", neighbours.toArray(new Long[0]));
+            try (PreparedStatement st = c.prepareStatement(sql)) {
+                st.setArray(1,ids); st.setArray(2,hashes); st.setArray(3,hashes); st.setArray(4,ids);
+                st.setQueryTimeout(3); st.setFetchSize(10_000);
+                int rows=0;
+                try (ResultSet r = st.executeQuery()) {
+                    while (r.next()) {
+                        if (++rows > MAX_REFINEMENT_ROWS) return java.util.Collections.emptyMap();
+                        byHash.computeIfAbsent(r.getLong(1), ignored -> new ArrayList<>())
+                                .add(new long[] {r.getLong(1),r.getInt(2),r.getInt(3),r.getInt(4)});
+                    }
+                }
+            } finally { ids.free(); hashes.free(); }
+            c.commit();
+            Map<Long,List<PanakoHit>> result = new HashMap<>();
+            int total=0;
+            // Preserve the broad query's multiplicity and last-print semantics.
+            for (long hash : queryHashes) for (int d=-range; d<=range; d++) {
+                List<long[]> rows = byHash.get(hash+d);
+                if (rows == null) continue;
+                for (long[] row : rows) {
+                    if (++total > MAX_REFINEMENT_HITS) return java.util.Collections.emptyMap();
+                    result.computeIfAbsent(hash, ignored -> new ArrayList<>())
+                            .add(new PanakoHit(hash,row[0],row[2],row[1],row[3]));
+                }
+            }
+            LOG.info(String.format("Verified %d shortlisted resources with %d hits in %.1f ms",
+                    candidates.size(),total,(System.nanoTime()-started)/1_000_000.0));
+            return result;
+        } catch (SQLException e) {
+            LOG.warning("Candidate verification unavailable; retaining broad-search results");
+            return java.util.Collections.emptyMap();
+        } finally {
+            // Also covers an over-budget result and a cancelled statement.
+            rollback(c); autoCommit(c);
+        }
+    }
+
 	@Override
 	public void printStatistics(boolean detailedStats) {
 		try (Statement statement = connection().createStatement()) {

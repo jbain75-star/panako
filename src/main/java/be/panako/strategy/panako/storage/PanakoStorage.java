@@ -114,6 +114,14 @@ public interface PanakoStorage {
 	 */
 	void processQueryQueue(Map<Long,List<PanakoHit>> matchAccumulator,int range,Set<Integer> resourcesToAvoid);
 
+    /** Optional bounded verification of candidates from a capped broad search.
+     * Returned evidence is scored separately; it must not replace an existing answer. */
+    default Map<Long,List<PanakoHit>> refineQuery(List<Long> queryHashes,
+            Map<Long,List<PanakoHit>> broadHits, int range, Set<Integer> resourcesToAvoid) {
+        return java.util.Collections.emptyMap();
+    }
+
+
 	/**
 	 * Removes a fingerprint from the database. Similar to the store operation this is done in batches.
 	 * @param fingerprintHash The hash to delete

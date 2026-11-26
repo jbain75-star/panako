@@ -288,6 +288,7 @@ static class StopWatch {String formattedToString(){return "offline";}}
 static class Log {void info(String x){}}
 static long hashFor(int i){long z=i+0x9e3779b97f4a7c15L;z=(z^(z>>>30))*0xbf58476d1ce4e5b9L;z=(z^(z>>>27))*0x94d049bb133111ebL;return (z^(z>>>31))&Long.MAX_VALUE;}
 static class Fixture {
+ Map<Long,List<PanakoHit>> refined=Collections.emptyMap();
  final boolean fail;final int latency;
  final List<PanakoFingerprint> prints=new ArrayList<>();final int[] hash,ids,t,f;final long[] near;final Set<Integer> avoid=new HashSet<>();
  Fixture(int rows,int seed,String shape){
@@ -317,6 +318,7 @@ static class PanakoStorage {
  if(!out.containsKey(key))out.put(key,new ArrayList<PanakoHit>());
  out.get(key).add(new PanakoHit(key,fx.near[i],fx.t[i],fx.ids[i],fx.f[i]));}
  }
+ Map<Long,List<PanakoHit>> refineQuery(List<Long> hashes,Map<Long,List<PanakoHit>> broad,int range,Set<Integer> avoid){Map<Long,List<PanakoHit>> out=new HashMap<>();fx.refined.forEach((h,rows)->{List<PanakoHit> kept=new ArrayList<>();for(PanakoHit row:rows)if(!avoid.contains(row.resourceID))kept.add(row);out.put(h,kept);});return out;}
  PanakoResourceMetadata getMetadata(long id){if(id%3==0)return null;PanakoResourceMetadata m=new PanakoResourceMetadata();m.path="fixture-"+id;return m;}
 }
 static class Base {
@@ -416,9 +418,36 @@ static void verifyRobustQuery() throws Exception {
  } finally {Config.store.clear();Config.store.putAll(saved);}
  System.out.println("ROBUST_QUERY_CHECK: PASS (production and wide hit windows; actual query recovery, tempo, duration gate, avoid list, short-burst fallback, weak legacy preservation, strong-answer preservation)");
 }
+static void verifyCandidateQuery() throws Exception {
+ HashMap<Key,String> saved=new HashMap<>(Config.store);
+ try {
+  Config.store.put(Key.PANAKO_ROBUST_ALIGNMENT_MIN_HITS,"40");
+  List<int[]> rows=new ArrayList<>();
+  for(int i=0;i<80;i++){int q=100+i*32;rows.add(new int[]{q,q+(i<20?232:5000+i*10),i<20?100:150});}
+  Fixture f=alignedFixture(rows);
+  List<String> broad=run("optimized",f,100);
+  Map<Long,List<PanakoHit>> complete=new HashMap<>();
+  for(PanakoFingerprint p:f.prints)complete.put(p.hash(),Arrays.asList(new PanakoHit(p.hash(),p.hash(),p.t1+232,1000,100)));
+  f.refined=complete;
+  List<String> improved=run("optimized",f,100);
+  requireRecording(improved,"Complete shortlist evidence did not recover the recording");
+  double score=Double.longBitsToDouble(Long.parseUnsignedLong(improved.get(0).split("\\|")[7],16));
+  if(score!=80||improved.size()!=1)throw new AssertionError("Refinement duplicated or lost the recovered result");
+  if(!run("optimized",f,1).equals(improved))throw new AssertionError("Refinement changed result-limit behavior");
+  f.avoid.add(1000);if(!run("optimized",f,100).get(0).startsWith("EMPTY"))throw new AssertionError("Refinement bypassed exclusions");f.avoid.clear();
+  Config.store.put(Key.PANAKO_MIN_MATCH_DURATION,"10000");
+  if(!run("optimized",f,100).get(0).startsWith("EMPTY"))throw new AssertionError("Refinement bypassed duration gate");
+  Config.store.put(Key.PANAKO_MIN_MATCH_DURATION,saved.get(Key.PANAKO_MIN_MATCH_DURATION));
+  // A damaged second pass must leave the original answer available.
+  for(PanakoFingerprint p:f.prints)complete.put(p.hash(),Arrays.asList(new PanakoHit(p.hash(),p.hash(),p.t1+5000,1000,150)));
+  if(!run("optimized",f,100).equals(broad))throw new AssertionError("Refinement discarded the broad answer");
+ } finally {Config.store.clear();Config.store.putAll(saved);}
+ System.out.println("CANDIDATE_QUERY_CHECK: PASS (recovery, result deduplication and limit, original-answer preservation, duration and exclusion gates)");
+}
 public static void main(String[]args)throws Exception{
  if(args[0].equals("verify")){
  verifyRobustQuery();
+ verifyCandidateQuery();
  for(String v:new String[]{"baseline","optimized"}){
    try{run(v,new Fixture(1000,1,"error"),100);throw new AssertionError("cursor error swallowed: "+v);}
    catch(java.lang.reflect.InvocationTargetException e){if(!(e.getCause() instanceof IllegalStateException)||!e.getCause().getMessage().equals("synthetic cursor failure"))throw e;}

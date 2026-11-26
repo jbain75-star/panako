@@ -133,3 +133,7 @@ Changed by AudioScout, 2026:
   failures that say nothing about the engine. A file that cannot be fetched now
   aborts the tests that need it as undecided, so the suite is honest on a
   build machine without the dataset and unchanged on one with it.
+- **Optional complete-candidate verification** (`PANAKO_PG_REFINE_CANDIDATES`,
+  default off): a bounded compact-index read restores truncated evidence for
+  up to eight shortlisted recordings. Separate alignment preserves broad-search
+  answers and the existing acceptance gates. See `CANDIDATE_VERIFICATION.md`.

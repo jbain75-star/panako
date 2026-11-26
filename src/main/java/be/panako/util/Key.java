@@ -455,6 +455,10 @@ public enum Key{
 	 */
 	PANAKO_PG_MAX_HITS_PER_HASH(2000),
 
+    /** Opt-in complete verification of at most eight compact-index candidates.
+     * The broad search cap and every alignment/acceptance threshold stay unchanged. */
+    PANAKO_PG_REFINE_CANDIDATES(0),
+
 	/**
 	 * Folder to store the lmdb databese
 	 */
