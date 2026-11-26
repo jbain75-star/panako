@@ -375,6 +375,10 @@ public enum Key{
 	 */
 	PANAKO_HIT_PART_DIVIDER(5),
 
+	/** Opt-in consensus recovery for weak/invalid timing fits. Zero disables it.
+	 * The positive value is the minimum number of aligned hits required. */
+	PANAKO_ROBUST_ALIGNMENT_MIN_HITS(0),
+
 
 	/**
 	 * After filtering hits in the matching step, a true positive  match should have at least this amount of hits

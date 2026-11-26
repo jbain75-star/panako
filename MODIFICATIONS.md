@@ -7,6 +7,20 @@ published here to satisfy that licence.
 
 Changed by AudioScout, 2026:
 
+- **Opt-in robust timing recovery** (25 November):
+  `PANAKO_ROBUST_ALIGNMENT_MIN_HITS=0` preserves previous matching by default.
+  A positive floor enables bounded, deterministic consensus fitting only for
+  candidates whose existing timing estimate lacks that support. It proposes
+  multiple timing lines, refines them against the whole candidate hit list,
+  and requires consistent pitch and independent query times. Existing strong
+  fits and the duration, tempo, pitch, and coverage gates remain intact.
+  Every recovery fit must pass the same tempo, pitch, filtered-hit, duration
+  and coverage gates as the legacy fit before it can win; the legacy result
+  stands when none does, so a short repeated-beat burst cannot hide a valid
+  match. A zero time tolerance means exact timing agreement, not "disabled".
+  Synthetic standalone checks cover noisy offset modes, key-lock tempo and
+  pitch shifts, deterministic output, random collisions, and repeated times.
+
 - **Query-local matching cleanup**, based on pinned revision `54d35cf4`:
   lazily cache numeric settings for one query, hoist repeated fingerprint and
   recording-group lookups, use primitive integer comparators, avoid redundant
