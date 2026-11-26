@@ -341,17 +341,46 @@ static List<String> run(Base b,Fixture f,int limit) throws Exception {
 }
 static String bits(double d){return Long.toHexString(Double.doubleToRawLongBits(d));}
 static String digest(List<String> values)throws Exception{return Base64.getEncoder().encodeToString(MessageDigest.getInstance("SHA-256").digest(values.toString().getBytes(StandardCharsets.UTF_8)));}
+static Fixture alignedFixture(List<int[]> rows) {
+ Fixture f=new Fixture(rows.size(),1,"noise");f.prints.clear();
+ for(int i=0;i<rows.size();i++) {
+  int[] row=rows.get(i);
+  f.prints.add(new PanakoFingerprint(hashFor(i),row[0],100));f.hash[i]=i;f.ids[i]=1000;
+  f.t[i]=row[1];f.f[i]=row[2];f.near[i]=hashFor(i);
+ }
+ return f;
+}
+// A 60-hit, one-second repeated-beat burst outnumbers the real alignment but
+// fails the duration gate; the query must fall back to the next fit.
+static Fixture burstFixture(int signalHits,boolean conflictingModes) {
+ List<int[]> rows=new ArrayList<>();
+ int spacing=2400/signalHits;
+ for(int i=0;i<signalHits;i++){int q=100+i*spacing;rows.add(new int[]{q,q+232,100});}
+ for(int j=0;j<60;j++){int q=1300+j*2;rows.add(new int[]{q,q+3000,100});}
+ if(conflictingModes)for(int k=0;k<40;k++){rows.add(new int[]{100+k,100+k+5000,150});rows.add(new int[]{2460+k,2460+k+12000,150});}
+ return alignedFixture(rows);
+}
+static void requireRecording(List<String> result,String message) {
+ if(!result.get(0).startsWith("1000|"))throw new AssertionError(message+": "+result);
+ double duration=Double.longBitsToDouble(Long.parseUnsignedLong(result.get(0).split("\\|")[4],16))
+   -Double.longBitsToDouble(Long.parseUnsignedLong(result.get(0).split("\\|")[3],16));
+ if(duration<5)throw new AssertionError(message+": short burst returned");
+}
 static void verifyRobustQuery() throws Exception {
  HashMap<Key,String> saved=new HashMap<>(Config.store);
+ // Production hit windows (fifths capped at 250) and the replay's wide halves.
+ String[][] windows={{"5","250"},{"2","2147483647"}};
  try {
+  for(String[] window:windows) {
+  Config.store.put(Key.PANAKO_HIT_PART_DIVIDER,window[0]);Config.store.put(Key.PANAKO_HIT_PART_MAX_SIZE,window[1]);
+  boolean production=window[0].equals("5");
   for(double time:new double[]{0.94,1,1.06}) {
-   Fixture f=new Fixture(200,1,"noise");f.prints.clear();
+   List<int[]> rows=new ArrayList<>();
    for(int i=0;i<200;i++) {
     int q=100+i*16;boolean signal=i%4==0;
-    f.prints.add(new PanakoFingerprint(hashFor(i),q,100));f.hash[i]=i;f.ids[i]=1000;
-    f.t[i]=q+(signal?(int)Math.round(232+(1-1/time)*q):(i<100?5000:12000));
-    f.f[i]=signal?100:150;f.near[i]=hashFor(i);
+    rows.add(new int[]{q,q+(signal?(int)Math.round(232+(1-1/time)*q):(i<100?5000:12000)),signal?100:150});
    }
+   Fixture f=alignedFixture(rows);
    Config.store.put(Key.PANAKO_ROBUST_ALIGNMENT_MIN_HITS,"0");
    List<String> original=run("optimized",f,100);
    if(!original.get(0).startsWith("EMPTY"))throw new AssertionError("Regression must fail without recovery");
@@ -366,12 +395,26 @@ static void verifyRobustQuery() throws Exception {
    f.avoid.add(1000);
    if(!run("optimized",f,100).get(0).startsWith("EMPTY"))throw new AssertionError("Recovery bypassed avoid list");
   }
+  Fixture burst=burstFixture(50,true);
+  Config.store.put(Key.PANAKO_ROBUST_ALIGNMENT_MIN_HITS,"0");
+  if(!run("optimized",burst,100).get(0).startsWith("EMPTY"))throw new AssertionError("Burst regression must fail without recovery");
+  Config.store.put(Key.PANAKO_ROBUST_ALIGNMENT_MIN_HITS,"40");
+  requireRecording(run("optimized",burst,100),"Short repeated-beat fit hid the valid recovery fit");
+  if(production) {
+   Fixture weakLegacy=burstFixture(25,false);
+   Config.store.put(Key.PANAKO_ROBUST_ALIGNMENT_MIN_HITS,"0");
+   List<String> legacy=run("optimized",weakLegacy,100);
+   requireRecording(legacy,"Legacy fit below the recovery floor must match without recovery");
+   Config.store.put(Key.PANAKO_ROBUST_ALIGNMENT_MIN_HITS,"40");
+   if(!legacy.equals(run("optimized",weakLegacy,100)))throw new AssertionError("Recovery dropped a valid legacy match");
+  }
   Fixture strong=new Fixture(20000,1,"dense");
   Config.store.put(Key.PANAKO_ROBUST_ALIGNMENT_MIN_HITS,"0");List<String> before=run("optimized",strong,100);
   Config.store.put(Key.PANAKO_ROBUST_ALIGNMENT_MIN_HITS,"40");
   if(!before.equals(run("optimized",strong,100)))throw new AssertionError("Recovery changed established strong answers");
+  }
  } finally {Config.store.clear();Config.store.putAll(saved);}
- System.out.println("ROBUST_QUERY_CHECK: PASS (actual query recovery, tempo, duration gate, avoid list, strong-answer preservation)");
+ System.out.println("ROBUST_QUERY_CHECK: PASS (production and wide hit windows; actual query recovery, tempo, duration gate, avoid list, short-burst fallback, weak legacy preservation, strong-answer preservation)");
 }
 public static void main(String[]args)throws Exception{
  if(args[0].equals("verify")){

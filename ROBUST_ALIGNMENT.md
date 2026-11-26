@@ -8,8 +8,11 @@ recognition and false-positive acceptance tests before enabling it.
 
 Recovery proposes a bounded set of timing lines, fits their supporting hits,
 and requires the configured minimum plus independent query times. It uses the
-existing time tolerance and tempo/pitch bounds. Duration, seconds-with-matches,
-filtered-hit gates, exclusions and result ordering still run afterward. A
+existing time tolerance (zero means exact agreement) and tempo/pitch bounds.
+Each distinct fit then goes through the same tempo, pitch, filtered-hit,
+duration and seconds-with-matches gates as the legacy fit; the passing fit
+with the most filtered hits wins, and the legacy result stands when no
+recovery fit passes. Exclusions and result ordering are unchanged. A
 candidate already supported by the configured number of legacy aligned hits
 retains its original fit. Fingerprint extraction and stored formats do not change.
 
@@ -33,7 +36,9 @@ java -cp build/robust-check be.panako.strategy.panako.RobustAlignmentCheck
 ```
 
 The checks cover 486 disabled-mode golden fixtures, enabled recovery in the
-actual query method, preservation of established strong answers and acceptance
-gates, and 285 synthetic timing/pitch/noise cases. Synthetic fixtures contain no
+actual query method under both the production hit windows (fifths capped at
+250) and wide halves, fallback past a short repeated-beat burst, preservation
+of weak legacy matches, established strong answers and acceptance gates, and
+288 synthetic timing/pitch/noise cases. Synthetic fixtures contain no
 private recordings or production fingerprints. `QueryCleanupTest` also runs
 these checks from the normal JUnit suite.

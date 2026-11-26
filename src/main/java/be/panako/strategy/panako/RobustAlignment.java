@@ -21,15 +21,25 @@ public final class RobustAlignment {
         }
     }
 
+    /** The best supported fit, or null when none qualifies. */
     public static Fit fit(int[] query, int[] reference, int[] frequencyDelta,
+            int minimum, double tolerance, double minTime, double maxTime,
+            double minFrequency, double maxFrequency, double bandsPerOctave) {
+        List<Fit> fits = fits(query, reference, frequencyDelta, minimum, tolerance,
+                minTime, maxTime, minFrequency, maxFrequency, bandsPerOctave);
+        return fits.isEmpty() ? null : fits.get(0);
+    }
+
+    /** Every distinct supported fit, most aligned hits first, then lowest residual. */
+    public static List<Fit> fits(int[] query, int[] reference, int[] frequencyDelta,
             int minimum, double tolerance, double minTime, double maxTime,
             double minFrequency, double maxFrequency, double bandsPerOctave) {
         int n = query.length;
         if (reference.length != n || frequencyDelta.length != n)
             throw new IllegalArgumentException("Alignment arrays differ in length");
-        if (minimum < 6 || n < minimum || tolerance <= 0 || !Double.isFinite(tolerance)) return null;
+        if (minimum < 6 || n < minimum || tolerance < 0 || !Double.isFinite(tolerance)) return Collections.emptyList();
         int low = Arrays.stream(query).min().orElse(0), high = Arrays.stream(query).max().orElse(0);
-        if (high <= low) return null;
+        if (high <= low) return Collections.emptyList();
         Search search = new Search(query, reference, frequencyDelta, minimum, tolerance,
                 minTime, maxTime, minFrequency, maxFrequency, bandsPerOctave);
 
@@ -70,14 +80,18 @@ public final class RobustAlignment {
             search.consider(slope, reference[a] - query[a] - slope * query[a],
                     (frequencyDelta[a] + frequencyDelta[b]) / 2.0);
         }
-        return search.best;
+        // Stable: equal count and residual keep discovery order.
+        search.fits.sort((a, b) -> a.count != b.count ? Integer.compare(b.count, a.count)
+                : Double.compare(a.residual, b.residual));
+        return search.fits;
     }
 
     private static final class Search {
         final int[] q, r, f;
         final int minimum;
         final double tolerance, minTime, maxTime, minFrequency, maxFrequency, bands;
-        Fit best;
+        final List<Fit> fits = new ArrayList<>();
+        final Set<List<Integer>> seen = new HashSet<>();
         Search(int[] q, int[] r, int[] f, int minimum, double tolerance,
                 double minTime, double maxTime, double minFrequency, double maxFrequency, double bands) {
             this.q=q; this.r=r; this.f=f; this.minimum=minimum; this.tolerance=tolerance;
@@ -121,8 +135,10 @@ public final class RobustAlignment {
             }
             // Repeated copies of one print are not independent timing evidence.
             if (count < minimum || times.size() < Math.min(12, minimum)) return;
-            if (best == null || count > best.count || (count == best.count && residual < best.residual))
-                best=new Fit(fs,fo,frequency,count,residual);
+            Fit fit = new Fit(fs,fo,frequency,count,residual);
+            if (seen.add(Arrays.asList(Float.floatToIntBits(fit.slope), Float.floatToIntBits(fit.offset),
+                    Float.floatToIntBits(fit.frequencyDelta))))
+                fits.add(fit);
         }
     }
 }

@@ -312,6 +312,61 @@ public class PanakoStrategy extends Strategy {
 		}
 		return mostCommonDeltaT;
 	}
+	private static final class Alignment {
+		final List<PanakoMatch> hits;
+		final float queryStart, queryStop, refStart, refStop, timeFactor, frequencyFactor, percentOfSecondsWithMatches;
+		Alignment(List<PanakoMatch> hits, float queryStart, float queryStop, float refStart, float refStop,
+				float timeFactor, float frequencyFactor, float percentOfSecondsWithMatches) {
+			this.hits = hits; this.queryStart = queryStart; this.queryStop = queryStop;
+			this.refStart = refStart; this.refStop = refStop; this.timeFactor = timeFactor;
+			this.frequencyFactor = frequencyFactor; this.percentOfSecondsWithMatches = percentOfSecondsWithMatches;
+		}
+	}
+
+	/** Applies the tempo, pitch, filtered-hit, duration and coverage gates to one timing fit; null when any fails. */
+	private Alignment alignment(List<PanakoMatch> hitlist, float slope, float offset, RobustAlignment.Fit consensus,
+			float timeFactor, float frequencyFactor, double threshold, QueryConfig config) {
+		//only continue processing when time factor is reasonable
+		if(!(timeFactor > config.getFloat(Key.PANAKO_MIN_TIME_FACTOR) && timeFactor < config.getFloat(Key.PANAKO_MAX_TIME_FACTOR) &&
+				frequencyFactor> config.getFloat(Key.PANAKO_MIN_FREQ_FACTOR) &&  frequencyFactor < config.getFloat(Key.PANAKO_MAX_FREQ_FACTOR)))
+			return null;
+		List<PanakoMatch> filteredHits = new ArrayList<>();
+		for(PanakoMatch hit : hitlist) {
+			float yActual = hit.deltaT();
+			float x = hit.queryTime;
+			float yPredicted = slope * x + offset;
+			//should be within an expected range
+			if(Math.abs(yActual-yPredicted) <= threshold
+					&& (consensus == null || Math.abs((hit.matchF1-hit.queryF1)-consensus.frequencyDelta) <= 2))
+				filteredHits.add(hit);
+		}
+		//ignore resources with too few filtered hits remaining
+		if(filteredHits.size() <= config.getInt(Key.PANAKO_MIN_HITS_FILTERED))
+			return null;
+		float queryStart = blocksToSeconds(filteredHits.get(0).queryTime, config);
+		float queryStop = blocksToSeconds(filteredHits.get(filteredHits.size()-1).queryTime, config);
+		if(queryStop - queryStart < config.getFloat(Key.PANAKO_MIN_MATCH_DURATION))
+			return null;
+		float refStart = blocksToSeconds(filteredHits.get(0).matchTime, config);
+		float refStop =  blocksToSeconds(filteredHits.get(filteredHits.size()-1).matchTime, config);
+		//Construct a histogram with the number of matches for each second
+		//Ideally there is a more or less equal number of matches each second
+		// note that the last second might not be a full second
+		Set<Integer> matchesPerSecondHistogram = new HashSet<>();
+		for(PanakoMatch hit : filteredHits) {
+			float offsetInSec = blocksToSeconds(hit.matchTime, config) - refStart;
+			int secondBin = (int) offsetInSec;
+			matchesPerSecondHistogram.add(secondBin);
+		}
+		//number of seconds bins
+		float numberOfMatchingSeconds = (float) Math.ceil(refStop - refStart);
+		float emptySeconds = numberOfMatchingSeconds - matchesPerSecondHistogram.size();
+		float percentOfSecondsWithMatches = 1 - (emptySeconds / numberOfMatchingSeconds);
+		if(!(percentOfSecondsWithMatches >= config.getFloat(Key.PANAKO_MIN_SEC_WITH_MATCH)))
+			return null;
+		return new Alignment(filteredHits, queryStart, queryStop, refStart, refStop,
+				timeFactor, frequencyFactor, percentOfSecondsWithMatches);
+	}
 	@Override
 	public void query(String query, int maxNumberOfResults, Set<Integer> avoid, QueryResultHandler handler) {
 		query(query,maxNumberOfResults,avoid,handler,0,MAX_TIME);
@@ -383,7 +438,6 @@ public class PanakoStrategy extends Strategy {
 		 LOG.info(String.format("Query for %d prints, %d matches in %s \n", printMap.size(),matchAccumulator.size(), w.formattedToString()));
 
 		 int minimumUnfilteredHits = config.getInt(Key.PANAKO_MIN_HITS_UNFILTERED);
-		 int minimumFilteredHits = config.getInt(Key.PANAKO_MIN_HITS_FILTERED);
 		 
 		 List<Integer> matchesToDelete = new ArrayList<>();
 		 hitsPerIdentifer.forEach((identifier, hitlist) -> {
@@ -443,7 +497,7 @@ public class PanakoStrategy extends Strategy {
 			 //threshold in time bins
 			 double threshold = config.getFloat(Key.PANAKO_QUERY_RANGE);
 
-			 RobustAlignment.Fit recovered = null;
+			 Alignment chosen = alignment(hitlist, slope, offset, null, timeFactor, frequencyFactor, threshold, config);
 			 int robustMinimum = config.getInt(Key.PANAKO_ROBUST_ALIGNMENT_MIN_HITS);
 			 if (robustMinimum >= 6 && hitlist.size() >= robustMinimum) {
 			     int legacyCount = 0;
@@ -462,90 +516,30 @@ public class PanakoStrategy extends Strategy {
 			             PanakoMatch hit = hitlist.get(i);
 			             q[i] = hit.queryTime; r[i] = hit.matchTime; f[i] = hit.matchF1 - hit.queryF1;
 			         }
-			         recovered = RobustAlignment.fit(q, r, f, robustMinimum, threshold,
+			         float bands = config.getFloat(Key.PANAKO_TRANSF_BANDS_PER_OCTAVE);
+			         // Every recovery fit passes the same result gates as the legacy
+			         // fit before it can win, so a short burst cannot hide a valid
+			         // fit and the legacy result stands when no recovery fit passes.
+			         for (RobustAlignment.Fit fit : RobustAlignment.fits(q, r, f, robustMinimum, threshold,
 			                 config.getFloat(Key.PANAKO_MIN_TIME_FACTOR), config.getFloat(Key.PANAKO_MAX_TIME_FACTOR),
-			                 config.getFloat(Key.PANAKO_MIN_FREQ_FACTOR), config.getFloat(Key.PANAKO_MAX_FREQ_FACTOR),
-			                 config.getFloat(Key.PANAKO_TRANSF_BANDS_PER_OCTAVE));
+			                 config.getFloat(Key.PANAKO_MIN_FREQ_FACTOR), config.getFloat(Key.PANAKO_MAX_FREQ_FACTOR), bands)) {
+			             Alignment candidate = alignment(hitlist, fit.slope, fit.offset, fit, 1.0f / (1 - fit.slope),
+			                     (float) Math.pow(2, fit.frequencyDelta / bands), threshold, config);
+			             if (candidate != null && (chosen == null || candidate.hits.size() > chosen.hits.size()))
+			                 chosen = candidate;
+			         }
 			     }
 			 }
-			 final RobustAlignment.Fit consensus = recovered;
-			 final float fitSlope = consensus == null ? slope : consensus.slope;
-			 final float fitOffset = consensus == null ? offset : consensus.offset;
-			 if (consensus != null) {
-			     timeFactor = 1.0f / (1 - fitSlope);
-			     frequencyFactor = (float) Math.pow(2, consensus.frequencyDelta
-			             / config.getFloat(Key.PANAKO_TRANSF_BANDS_PER_OCTAVE));
+			 if (chosen != null) {
+				 //retrieve meta-data
+				 PanakoResourceMetadata metadata = db.getMetadata((long) identifier);
+				 String refPath = "metadata unavailable!";
+				 if(metadata != null )
+					 refPath = metadata.path;
+				 QueryResult r = new QueryResult(queryPath, chosen.queryStart, chosen.queryStop, refPath, "" + identifier,
+						 chosen.refStart, chosen.refStop, chosen.hits.size(), chosen.timeFactor, chosen.frequencyFactor, chosen.percentOfSecondsWithMatches);
+				 queryResults.add(r);
 			 }
-
-			 
-			 //only continue processing when time factor is reasonable
-			 if(timeFactor > config.getFloat(Key.PANAKO_MIN_TIME_FACTOR) && timeFactor < config.getFloat(Key.PANAKO_MAX_TIME_FACTOR) &&
-					 frequencyFactor> config.getFloat(Key.PANAKO_MIN_FREQ_FACTOR) &&  frequencyFactor < config.getFloat(Key.PANAKO_MAX_FREQ_FACTOR)	 ) {
-				 List<PanakoMatch> filteredHits = new ArrayList<>();
-				 
-				 hitlist.forEach( hit ->{				 
-					 float yActual = hit.deltaT();
-					 float x = hit.queryTime;
-					 float yPredicted = fitSlope * x + fitOffset;
-					 
-					 //should be within an expected range
-					 boolean yInExpectedRange = Math.abs(yActual-yPredicted) <= threshold
-                             && (consensus == null || Math.abs((hit.matchF1-hit.queryF1)-consensus.frequencyDelta) <= 2);
-					 
-					 //if(hit.identifier!= FileUtils.getIdentifier(queryPath))
-						 //System.out.printf("pred: %f  actual: %f   dif abs: %f  threshold %f \n",yPredicted, yActual,Math.abs(yActual-yPredicted), threshold);
-					 
-					 if(yInExpectedRange) {
-						 filteredHits.add(hit);
-					 }
-				 });
-				 
-				 //ignore resources with too few filtered hits remaining
-				 if(filteredHits.size() > minimumFilteredHits) {
-					 //System.out.println("Matches " + identifier + " matches filtered hits: " + filteredHits.size());
-					 
-					 float minDuration = config.getFloat(Key.PANAKO_MIN_MATCH_DURATION);
-					 float queryStart = blocksToSeconds(filteredHits.get(0).queryTime, config);
-					 float queryStop = blocksToSeconds(filteredHits.get(filteredHits.size()-1).queryTime, config);
-					 float duration = queryStop - queryStart;
-					 
-					 if(duration >= minDuration) {
-						 int score = filteredHits.size();
-						
-						 
-						 float refStart = blocksToSeconds(filteredHits.get(0).matchTime, config);
-						 float refStop =  blocksToSeconds(filteredHits.get(filteredHits.size()-1).matchTime, config);
-						 
-						 //retrieve meta-data
-						 PanakoResourceMetadata metadata = db.getMetadata((long) identifier);
-						 String refPath = "metadata unavailable!";
-						 if(metadata != null )
-							 refPath = metadata.path;
-						 
-						 //Construct a histogram with the number of matches for each second
-						 //Ideally there is a more or less equal number of matches each second
-						 // note that the last second might not be a full second
-						 Set<Integer> matchesPerSecondHistogram = new HashSet<>();
-						 for(PanakoMatch hit : filteredHits) {
-							 //if(hit.identifier!= FileUtils.getIdentifier(queryPath))
-								 //System.out.printf("%d %d %d %d %d\n", hit.identifier, hit.matchTime, hit.queryTime, hit.originalHash, hit.matchedNearHash);
-							 float offsetInSec = blocksToSeconds(hit.matchTime, config) - refStart;
-							 int secondBin = (int) offsetInSec;
-							 matchesPerSecondHistogram.add(secondBin);
-						 }
-						
-						 //number of seconds bins
-						 float numberOfMatchingSeconds = (float) Math.ceil(refStop - refStart);
-						 float emptySeconds = numberOfMatchingSeconds - matchesPerSecondHistogram.size();
-						 float percentOfSecondsWithMatches = 1 - (emptySeconds / numberOfMatchingSeconds);
-
-						 if(percentOfSecondsWithMatches >= config.getFloat(Key.PANAKO_MIN_SEC_WITH_MATCH)){
-						 	QueryResult r = new QueryResult(queryPath,queryStart, queryStop, refPath, "" + identifier, refStart, refStop,  score, timeFactor, frequencyFactor,percentOfSecondsWithMatches);
-						 	queryResults.add(r);
-						 }
-					 }
-				 }
-			 }			 
 		 });
 		 
 		 if (queryResults.isEmpty()) {

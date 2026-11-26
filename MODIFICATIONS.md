@@ -14,6 +14,10 @@ Changed by AudioScout, 2026:
   multiple timing lines, refines them against the whole candidate hit list,
   and requires consistent pitch and independent query times. Existing strong
   fits and the duration, tempo, pitch, and coverage gates remain intact.
+  Every recovery fit must pass the same tempo, pitch, filtered-hit, duration
+  and coverage gates as the legacy fit before it can win; the legacy result
+  stands when none does, so a short repeated-beat burst cannot hide a valid
+  match. A zero time tolerance means exact timing agreement, not "disabled".
   Synthetic standalone checks cover noisy offset modes, key-lock tempo and
   pitch shifts, deterministic output, random collisions, and repeated times.
 

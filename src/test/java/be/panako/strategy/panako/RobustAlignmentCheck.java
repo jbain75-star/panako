@@ -60,6 +60,20 @@ public final class RobustAlignmentCheck {
         for(int i=67;i<100;i++){int q=100+(i-67)*60;jitter[i]=new int[]{q,q+9000+i*45,0};}
         RobustAlignment.Fit recovered=fit(jitter);
         require(recovered!=null && recovered.count>=40,"Failed split-bin timing regression");checks++;
+        // A zero tolerance demands exact timing agreement; it must not disable recovery.
+        int[][] exact=fixture(7,1,0,true);
+        for(int i=0;i<50;i++){int q=50+i*60;exact[i]=new int[]{q,q+232,0};}
+        int n=exact.length; int[] eq=new int[n], er=new int[n], ef=new int[n];
+        Arrays.sort(exact, Comparator.comparingInt(row -> row[0]));
+        for(int i=0;i<n;i++){eq[i]=exact[i][0];er[i]=exact[i][1];ef[i]=exact[i][2];}
+        RobustAlignment.Fit exactFit=RobustAlignment.fit(eq,er,ef,40,0,0.8,1.2,0.8,1.2,85);
+        require(exactFit!=null && exactFit.count>=50,"Zero tolerance disabled recovery");checks++;
+        require(RobustAlignment.fit(eq,er,ef,40,-1,0.8,1.2,0.8,1.2,85)==null,"Negative tolerance accepted");checks++;
+        // Every distinct fit is offered, best supported first, for the query's gates.
+        List<RobustAlignment.Fit> all=RobustAlignment.fits(eq,er,ef,40,2,0.8,1.2,0.8,1.2,85);
+        require(!all.isEmpty() && all.get(0).count==RobustAlignment.fit(eq,er,ef,40,2,0.8,1.2,0.8,1.2,85).count,"Fit order changed");
+        for(int i=1;i<all.size();i++) require(all.get(i-1).count>=all.get(i).count,"Fits not ranked by support");
+        checks++;
         System.out.println("Robust alignment: "+checks+" synthetic checks passed");
     }
 }
