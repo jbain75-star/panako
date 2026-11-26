@@ -2,8 +2,9 @@
 // Pitch conversion is a mathematical test double, not a vendored DSP implementation.
 // Query baseline: Panako 54d35cf4c1a887cded153dce97eb65c2afabb2bf.
 import java.util.*;import java.lang.management.*;import java.nio.file.*;import java.security.*;import java.nio.charset.*;
+import be.panako.strategy.panako.RobustAlignment;
 public class QueryReplay {
-enum Key {PANAKO_HIT_PART_DIVIDER("2"),PANAKO_HIT_PART_MAX_SIZE("2147483647"),PANAKO_MAX_FREQ_FACTOR("1.2"),PANAKO_MAX_TIME_FACTOR("1.2"),PANAKO_MIN_FREQ_FACTOR("0.8"),PANAKO_MIN_HITS_FILTERED("5"),PANAKO_MIN_HITS_UNFILTERED("10"),PANAKO_MIN_MATCH_DURATION("5"),PANAKO_MIN_SEC_WITH_MATCH("0.2"),PANAKO_MIN_TIME_FACTOR("0.8"),PANAKO_QUERY_RANGE("2"),PANAKO_SAMPLE_RATE("16000"),PANAKO_TRANSF_BANDS_PER_OCTAVE("85"),PANAKO_TRANSF_MIN_FREQ("110"),PANAKO_TRANSF_TIME_RESOLUTION("128");final String value;Key(String v){value=v;}String getDefaultValue(){return value;}}
+enum Key {PANAKO_ROBUST_ALIGNMENT_MIN_HITS("0"),PANAKO_HIT_PART_DIVIDER("2"),PANAKO_HIT_PART_MAX_SIZE("2147483647"),PANAKO_MAX_FREQ_FACTOR("1.2"),PANAKO_MAX_TIME_FACTOR("1.2"),PANAKO_MIN_FREQ_FACTOR("0.8"),PANAKO_MIN_HITS_FILTERED("5"),PANAKO_MIN_HITS_UNFILTERED("10"),PANAKO_MIN_MATCH_DURATION("5"),PANAKO_MIN_SEC_WITH_MATCH("0.2"),PANAKO_MIN_TIME_FACTOR("0.8"),PANAKO_QUERY_RANGE("2"),PANAKO_SAMPLE_RATE("16000"),PANAKO_TRANSF_BANDS_PER_OCTAVE("85"),PANAKO_TRANSF_MIN_FREQ("110"),PANAKO_TRANSF_TIME_RESOLUTION("128");final String value;Key(String v){value=v;}String getDefaultValue(){return value;}}
 static class Config {static final HashMap<Key,String> store=new HashMap<>();static{for(Key k:Key.values())store.put(k,k.getDefaultValue());}static String get(Key k){if(store.get(k)!=null)return store.get(k).trim();return k.getDefaultValue();}static float getFloat(Key k){return Float.parseFloat(get(k));}static int getInt(Key k){return Integer.parseInt(get(k));}}
 static class QueryResult {
 
@@ -340,8 +341,41 @@ static List<String> run(Base b,Fixture f,int limit) throws Exception {
 }
 static String bits(double d){return Long.toHexString(Double.doubleToRawLongBits(d));}
 static String digest(List<String> values)throws Exception{return Base64.getEncoder().encodeToString(MessageDigest.getInstance("SHA-256").digest(values.toString().getBytes(StandardCharsets.UTF_8)));}
+static void verifyRobustQuery() throws Exception {
+ HashMap<Key,String> saved=new HashMap<>(Config.store);
+ try {
+  for(double time:new double[]{0.94,1,1.06}) {
+   Fixture f=new Fixture(200,1,"noise");f.prints.clear();
+   for(int i=0;i<200;i++) {
+    int q=100+i*16;boolean signal=i%4==0;
+    f.prints.add(new PanakoFingerprint(hashFor(i),q,100));f.hash[i]=i;f.ids[i]=1000;
+    f.t[i]=q+(signal?(int)Math.round(232+(1-1/time)*q):(i<100?5000:12000));
+    f.f[i]=signal?100:150;f.near[i]=hashFor(i);
+   }
+   Config.store.put(Key.PANAKO_ROBUST_ALIGNMENT_MIN_HITS,"0");
+   List<String> original=run("optimized",f,100);
+   if(!original.get(0).startsWith("EMPTY"))throw new AssertionError("Regression must fail without recovery");
+   Config.store.put(Key.PANAKO_ROBUST_ALIGNMENT_MIN_HITS,"40");
+   List<String> recovered=run("optimized",f,100);
+   if(!recovered.get(0).startsWith("1000|"))throw new AssertionError("Query did not recover correct resource");
+   double score=Double.longBitsToDouble(Long.parseUnsignedLong(recovered.get(0).split("\\|")[7],16));
+   if(score<40)throw new AssertionError("Recovery lowered the acceptance floor");
+   Config.store.put(Key.PANAKO_MIN_MATCH_DURATION,"10000");
+   if(!run("optimized",f,100).get(0).startsWith("EMPTY"))throw new AssertionError("Recovery bypassed duration gate");
+   Config.store.put(Key.PANAKO_MIN_MATCH_DURATION,saved.get(Key.PANAKO_MIN_MATCH_DURATION));
+   f.avoid.add(1000);
+   if(!run("optimized",f,100).get(0).startsWith("EMPTY"))throw new AssertionError("Recovery bypassed avoid list");
+  }
+  Fixture strong=new Fixture(20000,1,"dense");
+  Config.store.put(Key.PANAKO_ROBUST_ALIGNMENT_MIN_HITS,"0");List<String> before=run("optimized",strong,100);
+  Config.store.put(Key.PANAKO_ROBUST_ALIGNMENT_MIN_HITS,"40");
+  if(!before.equals(run("optimized",strong,100)))throw new AssertionError("Recovery changed established strong answers");
+ } finally {Config.store.clear();Config.store.putAll(saved);}
+ System.out.println("ROBUST_QUERY_CHECK: PASS (actual query recovery, tempo, duration gate, avoid list, strong-answer preservation)");
+}
 public static void main(String[]args)throws Exception{
  if(args[0].equals("verify")){
+ verifyRobustQuery();
  for(String v:new String[]{"baseline","optimized"}){
    try{run(v,new Fixture(1000,1,"error"),100);throw new AssertionError("cursor error swallowed: "+v);}
    catch(java.lang.reflect.InvocationTargetException e){if(!(e.getCause() instanceof IllegalStateException)||!e.getCause().getMessage().equals("synthetic cursor failure"))throw e;}

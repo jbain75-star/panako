@@ -16,6 +16,11 @@ class QueryCleanupTest {
     }
 
     @Test
+    void robustAlignmentRejectsNoiseAndPreservesTempo() {
+        RobustAlignmentCheck.main(new String[0]);
+    }
+
+    @Test
     void actualNumericCacheIsLazyAndDoesNotSurviveAnotherQuery() throws Exception {
         Class<?> type = Class.forName(PanakoStrategy.class.getName() + "$QueryConfig");
         Constructor<?> constructor = type.getDeclaredConstructor();

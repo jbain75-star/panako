@@ -442,6 +442,41 @@ public class PanakoStrategy extends Strategy {
 			 
 			 //threshold in time bins
 			 double threshold = config.getFloat(Key.PANAKO_QUERY_RANGE);
+
+			 RobustAlignment.Fit recovered = null;
+			 int robustMinimum = config.getInt(Key.PANAKO_ROBUST_ALIGNMENT_MIN_HITS);
+			 if (robustMinimum >= 6 && hitlist.size() >= robustMinimum) {
+			     int legacyCount = 0;
+			     if (timeFactor > config.getFloat(Key.PANAKO_MIN_TIME_FACTOR)
+			             && timeFactor < config.getFloat(Key.PANAKO_MAX_TIME_FACTOR)
+			             && frequencyFactor > config.getFloat(Key.PANAKO_MIN_FREQ_FACTOR)
+			             && frequencyFactor < config.getFloat(Key.PANAKO_MAX_FREQ_FACTOR)) {
+			         for (PanakoMatch hit : hitlist)
+			             if (Math.abs(hit.deltaT() - (slope * hit.queryTime + offset)) <= threshold) legacyCount++;
+			     }
+			     // Preserve already strong answers; spend the bounded fit only
+			     // on candidates the old timing estimate could not establish.
+			     if (legacyCount < robustMinimum) {
+			         int[] q = new int[hitlist.size()], r = new int[q.length], f = new int[q.length];
+			         for (int i = 0; i < q.length; i++) {
+			             PanakoMatch hit = hitlist.get(i);
+			             q[i] = hit.queryTime; r[i] = hit.matchTime; f[i] = hit.matchF1 - hit.queryF1;
+			         }
+			         recovered = RobustAlignment.fit(q, r, f, robustMinimum, threshold,
+			                 config.getFloat(Key.PANAKO_MIN_TIME_FACTOR), config.getFloat(Key.PANAKO_MAX_TIME_FACTOR),
+			                 config.getFloat(Key.PANAKO_MIN_FREQ_FACTOR), config.getFloat(Key.PANAKO_MAX_FREQ_FACTOR),
+			                 config.getFloat(Key.PANAKO_TRANSF_BANDS_PER_OCTAVE));
+			     }
+			 }
+			 final RobustAlignment.Fit consensus = recovered;
+			 final float fitSlope = consensus == null ? slope : consensus.slope;
+			 final float fitOffset = consensus == null ? offset : consensus.offset;
+			 if (consensus != null) {
+			     timeFactor = 1.0f / (1 - fitSlope);
+			     frequencyFactor = (float) Math.pow(2, consensus.frequencyDelta
+			             / config.getFloat(Key.PANAKO_TRANSF_BANDS_PER_OCTAVE));
+			 }
+
 			 
 			 //only continue processing when time factor is reasonable
 			 if(timeFactor > config.getFloat(Key.PANAKO_MIN_TIME_FACTOR) && timeFactor < config.getFloat(Key.PANAKO_MAX_TIME_FACTOR) &&
@@ -451,10 +486,11 @@ public class PanakoStrategy extends Strategy {
 				 hitlist.forEach( hit ->{				 
 					 float yActual = hit.deltaT();
 					 float x = hit.queryTime;
-					 float yPredicted = slope * x + offset;
+					 float yPredicted = fitSlope * x + fitOffset;
 					 
 					 //should be within an expected range
-					 boolean yInExpectedRange = Math.abs(yActual-yPredicted) <= threshold ; 
+					 boolean yInExpectedRange = Math.abs(yActual-yPredicted) <= threshold
+                             && (consensus == null || Math.abs((hit.matchF1-hit.queryF1)-consensus.frequencyDelta) <= 2);
 					 
 					 //if(hit.identifier!= FileUtils.getIdentifier(queryPath))
 						 //System.out.printf("pred: %f  actual: %f   dif abs: %f  threshold %f \n",yPredicted, yActual,Math.abs(yActual-yPredicted), threshold);

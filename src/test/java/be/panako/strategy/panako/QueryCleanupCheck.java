@@ -34,7 +34,8 @@ public class QueryCleanupCheck {
         Files.writeString(goldenFile, Files.readString(resources.resolve("Golden.java.template")), StandardCharsets.UTF_8);
         JavaCompiler compiler = ToolProvider.getSystemJavaCompiler();
         if(compiler == null || compiler.run(null, null, null, "--release", "11", "-d", output.toString(),
-                replayFile.toString(), goldenFile.toString()) != 0) {
+                replayFile.toString(), goldenFile.toString(),
+                root.resolve("src/main/java/be/panako/strategy/panako/RobustAlignment.java").toString()) != 0) {
             throw new AssertionError("Could not compile actual query replay");
         }
         if(args.length == 0) {
