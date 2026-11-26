@@ -389,11 +389,13 @@ public class PanakoStrategy extends Strategy {
 		PanakoStorage db = getStorage();
 		
 		Map<Long,PanakoFingerprint> printMap = new HashMap<>();
+        List<Long> queryHashes = new ArrayList<>();
 		
 		//query
 		for(PanakoFingerprint print : prints) {
 			long hash = print.hash();
 			db.addToQueryQueue(hash);
+            queryHashes.add(hash);
 			printMap.put(hash, print);
 		}
 		
@@ -405,35 +407,9 @@ public class PanakoStrategy extends Strategy {
 		db.processQueryQueue(matchAccumulator,queryRange , avoid);
 		
 
-		 HashMap<Integer,List<PanakoMatch>> hitsPerIdentifer = new HashMap<>();
-		 
-		 final List<QueryResult> queryResults = new ArrayList<>();
-
-		 matchAccumulator.forEach((fingerprintHash, dbHits) -> {
-
-			 PanakoFingerprint print = printMap.get(fingerprintHash);
-			 dbHits.forEach((dbHit)->{
-				//long matchingHash  = data[0];
-				 int identifier = dbHit.resourceID;
-				 int matchTime = dbHit.t;
-				 List<PanakoMatch> group = hitsPerIdentifer.get(identifier);
-				 if(group == null){
-					group = new ArrayList<>();
-					hitsPerIdentifer.put(identifier, group);
-				 }
-				 PanakoMatch hit = new PanakoMatch();
-				 hit.identifier = identifier;
-				 hit.matchTime = matchTime;
-				 hit.originalHash = dbHit.originalHash;
-				 hit.matchedNearHash = dbHit.matchedNearHash;
-				 hit.queryTime = print.t1;
-				 
-				 hit.queryF1 = print.f1;
-				 hit.matchF1 = dbHit.f;
-				 
-				 group.add(hit);
-			 });
-		 });
+        Map<Integer,List<PanakoMatch>> hitsPerIdentifer = groupHits(matchAccumulator, printMap);
+        final List<QueryResult> queryResults = new ArrayList<>();
+        Map<Long,List<PanakoHit>> verified = db.refineQuery(queryHashes, matchAccumulator, queryRange, avoid);
 
 		 LOG.info(String.format("Query for %d prints, %d matches in %s \n", printMap.size(),matchAccumulator.size(), w.formattedToString()));
 
@@ -450,9 +426,15 @@ public class PanakoStrategy extends Strategy {
 			 hitsPerIdentifer.remove(identifier);
 		 });
 		 
-		 hitsPerIdentifer.forEach((identifier, hitlist) -> {
-			 
-			 //sort by query time
+        List<Map.Entry<Integer,List<PanakoMatch>>> candidates = new ArrayList<>(hitsPerIdentifer.entrySet());
+        // Score the complete candidate separately. Extra evidence must never
+        // discard a strong answer already established by the broad search.
+        for (Map.Entry<Integer,List<PanakoMatch>> candidate : groupHits(verified, printMap).entrySet())
+            if (candidate.getValue().size() >= minimumUnfilteredHits) candidates.add(candidate);
+        candidates.forEach(candidateEntry -> {
+            int identifier = candidateEntry.getKey();
+            List<PanakoMatch> hitlist = candidateEntry.getValue();
+             //sort by query time
 			 Collections.sort(hitlist, (Comparator<? super PanakoMatch>) (PanakoMatch a, PanakoMatch b) -> Integer.compare(a.queryTime, b.queryTime));
 			
 			 //view the first and last hits (max 250)
@@ -551,6 +533,8 @@ public class PanakoStrategy extends Strategy {
 		 }else {
 			 //sort results by score desc
 			 queryResults.sort((Comparator<? super QueryResult>) (QueryResult a, QueryResult b) -> Integer.compare((int) b.score, (int) a.score));
+            Set<String> answered = new HashSet<>();
+            queryResults.removeIf(result -> !answered.add(result.refIdentifier));
 			 //limit results to max number of results, if needed
 			 List<QueryResult> finalResults = queryResults;
 			 if(queryResults.size()>maxNumberOfResults) {
@@ -563,6 +547,39 @@ public class PanakoStrategy extends Strategy {
 		 }
 	}
 	
+
+    private Map<Integer,List<PanakoMatch>> groupHits(Map<Long,List<PanakoHit>> accumulator,
+            Map<Long,PanakoFingerprint> printMap) {
+        Map<Integer,List<PanakoMatch>> grouped = new HashMap<>();
+		 accumulator.forEach((fingerprintHash, dbHits) -> {
+
+			 PanakoFingerprint print = printMap.get(fingerprintHash);
+			 dbHits.forEach((dbHit)->{
+				//long matchingHash  = data[0];
+				 int identifier = dbHit.resourceID;
+				 int matchTime = dbHit.t;
+				 List<PanakoMatch> group = grouped.get(identifier);
+				 if(group == null){
+					group = new ArrayList<>();
+					grouped.put(identifier, group);
+				 }
+				 PanakoMatch hit = new PanakoMatch();
+				 hit.identifier = identifier;
+				 hit.matchTime = matchTime;
+				 hit.originalHash = dbHit.originalHash;
+				 hit.matchedNearHash = dbHit.matchedNearHash;
+				 hit.queryTime = print.t1;
+
+				 hit.queryF1 = print.f1;
+				 hit.matchF1 = dbHit.f;
+
+				 group.add(hit);
+			 });
+		 });
+
+        return grouped;
+    }
+
 	@Override
 	public void monitor(String query, int maxNumberOfReqults, Set<Integer> avoid, QueryResultHandler handler) {
 		int overlapInSeconds = Config.getInt(Key.MONITOR_OVERLAP); // 5

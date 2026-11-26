@@ -82,6 +82,13 @@ public class PanakoCachingStorage implements PanakoStorage{
         invertedIndex.processQueryQueue(matchAccumulator,range,resourcesToAvoid);
     }
 
+
+    @Override
+    public Map<Long,List<PanakoHit>> refineQuery(List<Long> hashes,
+            Map<Long,List<PanakoHit>> hits, int range, Set<Integer> avoid) {
+        return invertedIndex.refineQuery(hashes, hits, range, avoid);
+    }
+
     @Override
     public void addToDeleteQueue(long fingerprintHash, int resourceIdentifier, int t1, int f1) {
         cachingIndex.addToDeleteQueue(fingerprintHash,resourceIdentifier,t1,f1);
