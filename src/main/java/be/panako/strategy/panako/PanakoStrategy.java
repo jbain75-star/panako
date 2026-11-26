@@ -525,8 +525,12 @@ public class PanakoStrategy extends Strategy {
 			                 config.getFloat(Key.PANAKO_MIN_FREQ_FACTOR), config.getFloat(Key.PANAKO_MAX_FREQ_FACTOR), bands)) {
 			             Alignment candidate = alignment(hitlist, fit.slope, fit.offset, fit, 1.0f / (1 - fit.slope),
 			                     (float) Math.pow(2, fit.frequencyDelta / bands), threshold, config);
-			             if (candidate != null && (chosen == null || candidate.hits.size() > chosen.hits.size()))
-			                 chosen = candidate;
+			             // Fits arrive ranked by aligned hits, which the gate's filtered
+			             // count reproduces, so the first passing fit is the best one.
+			             if (candidate != null) {
+			                 if (chosen == null || candidate.hits.size() > chosen.hits.size()) chosen = candidate;
+			                 break;
+			             }
 			         }
 			     }
 			 }
