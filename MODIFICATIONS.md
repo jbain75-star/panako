@@ -7,6 +7,14 @@ published here to satisfy that licence.
 
 Changed by AudioScout, 2026:
 
+- **Ordered compact lookup merge** (27 November): retrieve the same per-hash
+  capped, excluded and deduplicated tuples using `DISTINCT ON` over `UNION ALL`.
+  PostgreSQL can merge the ordered branches and stop at the cap instead of
+  hashing and sorting their complete union. Both branches remain in one SQL
+  snapshot; stored fingerprints, caps and matching behavior are unchanged.
+  Exact real-PostgreSQL comparisons cover dense neighbors, duplicate reprints,
+  exclusions, unlimited caps, signed IDs and query-chunk multiplicity.
+
 - **Opt-in robust timing recovery** (25 November):
   `PANAKO_ROBUST_ALIGNMENT_MIN_HITS=0` preserves previous matching by default.
   A positive floor enables bounded, deterministic consensus fitting only for
