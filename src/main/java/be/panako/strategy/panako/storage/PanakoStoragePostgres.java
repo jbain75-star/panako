@@ -293,6 +293,7 @@ public class PanakoStoragePostgres implements PanakoStorage {
 				statement.executeQuery("SELECT * FROM panako_fingerprint_search LIMIT 0").close();
 				statement.executeQuery("SELECT * FROM panako_fingerprint_by_resource LIMIT 0").close();
 				try (ResultSet r = statement.executeQuery("SELECT to_regprocedure('panako_compact_hits(bigint,bigint,integer[],integer)') IS NOT NULL "
+						+ "AND to_regprocedure('panako_compact_packed_hits(bigint,bigint,integer[],integer)') IS NOT NULL "
 						+ "AND to_regprocedure('panako_compact_delete_resource(integer)') IS NOT NULL "
 						+ "AND to_regprocedure('panako_compact_delete_fingerprints(bigint[],integer[],integer[],integer[])') IS NOT NULL")) {
 					r.next(); if (!r.getBoolean(1)) throw new IllegalStateException("Incomplete compact storage schema");
@@ -564,6 +565,17 @@ public class PanakoStoragePostgres implements PanakoStorage {
 		queryQueue.get(threadID).add(queryHash);
 	}
 
+    /** Ordered merge of the same capped packed and recent tuples; one SQL snapshot. */
+    static final String COMPACT_QUERY_SQL = "SELECT q.query_hash,f.hash,f.resource_id,f.t,f.f FROM unnest(?) q(query_hash) "
+                    + "CROSS JOIN LATERAL (SELECT q.query_hash - ? AS low_hash, q.query_hash + ? AS high_hash, "
+                    + "?::integer[] AS avoid, ?::integer AS max_hits) bounds "
+                    + "JOIN LATERAL (SELECT DISTINCT ON (hash,resource_id,t,f) * FROM ("
+                    + "(SELECT h.hash,h.resource_id,h.t,h.f FROM panako_fingerprint h "
+                    + "WHERE h.hash BETWEEN bounds.low_hash AND bounds.high_hash AND h.resource_id <> ALL(bounds.avoid) "
+                    + "ORDER BY h.hash,h.resource_id,h.t,h.f LIMIT nullif(greatest(bounds.max_hits,0),0)) "
+                    + "UNION ALL SELECT * FROM panako_compact_packed_hits(bounds.low_hash,bounds.high_hash,bounds.avoid,bounds.max_hits)"
+                    + ") hits ORDER BY hash,resource_id,t,f LIMIT nullif(greatest(bounds.max_hits,0),0)) f ON true";
+
 	@Override
 	public void processQueryQueue(Map<Long, List<PanakoHit>> matchAccumulator, int range) {
 		processQueryQueue(matchAccumulator, range, new HashSet<Integer>());
@@ -586,8 +598,13 @@ public class PanakoStoragePostgres implements PanakoStorage {
 		int maxHits = Config.getInt(Key.PANAKO_PG_MAX_HITS_PER_HASH);
 		String sql;
 		if (compact) {
-			sql = "SELECT q.query_hash,f.hash,f.resource_id,f.t,f.f FROM unnest(?) q(query_hash) "
-					+ "JOIN LATERAL panako_compact_hits(q.query_hash - ?, q.query_hash + ?, ?, ?) f ON true";
+            // Both branches already provide their first K eligible tuples in
+            // canonical order. DISTINCT ON lets PostgreSQL merge those streams,
+            // deduplicate adjacent equal tuples, and stop at K. UNION otherwise
+            // hashes every tuple and sorts the entire union for every hash.
+            // Keep this in one statement: a concurrent compaction must not move
+            // a tuple between the two reads' snapshots and make it disappear.
+            sql = COMPACT_QUERY_SQL;
 		} else {
 			sql = "SELECT q.query_hash, f.hash, f.resource_id, f.t, f.f "
 					+ "FROM unnest(?) AS q(query_hash) "
