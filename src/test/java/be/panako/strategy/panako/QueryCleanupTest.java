@@ -21,6 +21,11 @@ class QueryCleanupTest {
     }
 
     @Test
+    void completeCandidatesRecoverSparseMatchesRegardlessOfRowOrder() {
+        StableAlignmentCheck.main(new String[0]);
+    }
+
+    @Test
     void actualNumericCacheIsLazyAndDoesNotSurviveAnotherQuery() throws Exception {
         Class<?> type = Class.forName(PanakoStrategy.class.getName() + "$QueryConfig");
         Constructor<?> constructor = type.getDeclaredConstructor();

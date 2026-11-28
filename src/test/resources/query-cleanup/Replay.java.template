@@ -438,6 +438,20 @@ static void verifyCandidateQuery() throws Exception {
   Config.store.put(Key.PANAKO_MIN_MATCH_DURATION,"10000");
   if(!run("optimized",f,100).get(0).startsWith("EMPTY"))throw new AssertionError("Refinement bypassed duration gate");
   Config.store.put(Key.PANAKO_MIN_MATCH_DURATION,saved.get(Key.PANAKO_MIN_MATCH_DURATION));
+  // A sparse complete candidate must reach the new alignment through the
+  // actual production query, and still obey its duration and exclusion gates.
+  Random sparseRandom=new Random(11);List<int[]> sparseRows=new ArrayList<>();
+  for(int i=0;i<1600;i++){int q=sparseRandom.nextInt(3600);sparseRows.add(new int[]{q,sparseRandom.nextInt(60000),75+sparseRandom.nextInt(51)});}
+  for(int i=0;i<64;i++){int q=60+i*54;sparseRows.add(new int[]{q,q+22000+(int)Math.round((1-1/1.03)*q)+i%3-1,100});}
+  for(int i=0;i<60;i++){int q=1300+i;sparseRows.add(new int[]{q,q+3000,100});}
+  Fixture sparse=alignedFixture(sparseRows);Map<Long,List<PanakoHit>> sparseComplete=new HashMap<>();
+  for(int i=0;i<sparseRows.size();i++){PanakoFingerprint p=sparse.prints.get(i);int[] row=sparseRows.get(i);sparseComplete.put(p.hash(),Arrays.asList(new PanakoHit(p.hash(),p.hash(),row[1],1000,row[2])));sparse.ids[i]=20000+i/4;}
+  sparse.refined=sparseComplete;List<String> recovered=run("optimized",sparse,100);
+  requireRecording(recovered,"Sparse complete evidence was not passed through the stable matcher");
+  if(Double.longBitsToDouble(Long.parseUnsignedLong(recovered.get(0).split("\\|")[7],16))<60)throw new AssertionError("Sparse match below expected support");
+  sparse.avoid.add(1000);if(run("optimized",sparse,100).stream().anyMatch(x->x.startsWith("1000|")))throw new AssertionError("Sparse recovery bypassed exclusions");sparse.avoid.clear();
+  Config.store.put(Key.PANAKO_MIN_MATCH_DURATION,"10000");if(!run("optimized",sparse,100).get(0).startsWith("EMPTY"))throw new AssertionError("Sparse recovery bypassed duration");
+  Config.store.put(Key.PANAKO_MIN_MATCH_DURATION,saved.get(Key.PANAKO_MIN_MATCH_DURATION));
   // A damaged second pass must leave the original answer available.
   for(PanakoFingerprint p:f.prints)complete.put(p.hash(),Arrays.asList(new PanakoHit(p.hash(),p.hash(),p.t1+5000,1000,150)));
   if(!run("optimized",f,100).equals(broad))throw new AssertionError("Refinement discarded the broad answer");

@@ -86,6 +86,70 @@ public final class RobustAlignment {
         return search.fits;
     }
 
+    /** Additional bounded search for the at-most-eight complete PG candidates.
+     * A sparse real line can be missed by the random pair budget. Sweep the
+     * permitted tempo interval, vote for offset/pitch, then validate the best
+     * hypotheses with the unchanged full-resolution acceptance gates.
+     * Canonical input makes both sampling and floating-point sums independent
+     * of SQL row ordering. Broad-search behavior remains unchanged.
+     */
+    public static List<Fit> verifiedFits(int[] query, int[] reference, int[] frequencyDelta,
+            int minimum, double tolerance, double minTime, double maxTime,
+            double minFrequency, double maxFrequency, double bandsPerOctave) {
+        int n = query.length;
+        if (reference.length != n || frequencyDelta.length != n)
+            throw new IllegalArgumentException("Alignment arrays differ in length");
+        if (n > 10000 || tolerance <= 0 || !Double.isFinite(tolerance))
+            return fits(query, reference, frequencyDelta, minimum, tolerance,
+                    minTime, maxTime, minFrequency, maxFrequency, bandsPerOctave);
+        Integer[] order = new Integer[n];
+        for (int i=0;i<n;i++) order[i]=i;
+        Arrays.sort(order, Comparator.comparingInt((Integer i)->query[i])
+                .thenComparingInt(i->reference[i]).thenComparingInt(i->frequencyDelta[i]));
+        int[] q=new int[n], r=new int[n], f=new int[n];
+        for(int i=0;i<n;i++){int j=order[i];q[i]=query[j];r[i]=reference[j];f[i]=frequencyDelta[j];}
+        List<Fit> existing = fits(q,r,f,minimum,tolerance,minTime,maxTime,minFrequency,maxFrequency,bandsPerOctave);
+        if (minimum < 6 || n < minimum || n==0 || q[n-1]<=q[0]) return existing;
+        double lowSlope=1-1/minTime, highSlope=1-1/maxTime;
+        if (!Double.isFinite(lowSlope) || !Double.isFinite(highSlope) || highSlope<=lowSlope) return existing;
+        int steps=Math.max(2,(int)Math.ceil((highSlope-lowSlope)*(q[n-1]-q[0])/(2*tolerance)));
+        if (steps<1 || steps>1024) return existing;
+        Search search=new Search(q,r,f,minimum,tolerance,minTime,maxTime,minFrequency,maxFrequency,bandsPerOctave);
+        // Highest-support seeds first, with explicit tie ordering. The retained
+        // seed budget bounds expensive full-list refinement independently of n.
+        Comparator<double[]> ranked=Comparator.<double[]>comparingDouble(a->-a[0])
+                .thenComparingDouble(a->a[1]).thenComparingDouble(a->a[2]).thenComparingDouble(a->a[3]);
+        PriorityQueue<double[]> best=new PriorityQueue<>(ranked.reversed());
+        Map<Integer,List<Integer>> pitchRows=new TreeMap<>();
+        for(int i=0;i<n;i++) for(int center=f[i]-2;center<=f[i]+2;center++) {
+            double pitch=Math.pow(2,center/bandsPerOctave);
+            if(pitch>minFrequency && pitch<maxFrequency)
+                pitchRows.computeIfAbsent(center,k->new ArrayList<>()).add(i);
+        }
+        for (Map.Entry<Integer,List<Integer>> group: pitchRows.entrySet()) {
+            if(group.getValue().size()<minimum) continue;
+            for(int step=1;step<steps;step++) {
+                double slope=lowSlope+(highSlope-lowSlope)*step/steps;
+                Map<Long,Integer> votes=new HashMap<>();
+                for(int i:group.getValue()) {
+                    long bin=Math.round((r[i]-q[i]-slope*q[i])/tolerance);
+                    for(int d=-1;d<=1;d++) votes.merge(bin+d,1,Integer::sum);
+                }
+                for(Map.Entry<Long,Integer> vote:votes.entrySet()) if(vote.getValue()>=minimum) {
+                    double[] seed={vote.getValue(),slope,vote.getKey()*tolerance,group.getKey()};
+                    if(best.size()<64) best.add(seed);
+                    else if(ranked.compare(seed,best.peek())<0){best.poll();best.add(seed);}
+                }
+            }
+        }
+        List<double[]> seeds=new ArrayList<>(best);seeds.sort(ranked);
+        for(double[] seed:seeds) search.consider(seed[1],seed[2],seed[3],true);
+        search.fits.addAll(existing);
+        search.fits.sort(Comparator.<Fit>comparingInt(a->-a.count).thenComparingDouble(a->a.residual)
+                .thenComparingDouble(a->a.slope).thenComparingDouble(a->a.offset).thenComparingDouble(a->a.frequencyDelta));
+        return search.fits;
+    }
+
     private static final class Search {
         final int[] q, r, f;
         final int minimum;
@@ -104,19 +168,28 @@ public final class RobustAlignment {
                     && pitch > minFrequency && pitch < maxFrequency;
         }
         void consider(double slope, double offset, double frequency) {
+            consider(slope, offset, frequency, false);
+        }
+        void consider(double slope, double offset, double frequency, boolean estimatePitch) {
             if (!allowed(slope, frequency)) return;
             // Refine a coarse hypothesis, then repeatedly trim to the same
             // timing tolerance as the original matcher. No acceptance floor
             // or allowable tempo/pitch range is relaxed.
             for (int pass = 0; pass < 3; pass++) {
                 double sx=0, sy=0, sxx=0, sxy=0; int count=0;
+                int[] pitches=estimatePitch ? new int[q.length] : null;
                 double range = pass == 0 ? tolerance * 2 : tolerance;
                 for (int i = 0; i < q.length; i++) {
                     double y = r[i] - q[i];
                     if (Math.abs(y - slope*q[i] - offset) > range || Math.abs(f[i]-frequency) > 2) continue;
+                    if (estimatePitch) pitches[count]=f[i];
                     double x=q[i]; sx+=x; sy+=y; sxx+=x*x; sxy+=x*y; count++;
                 }
                 if (count < minimum) return;
+                if (estimatePitch) {
+                    Arrays.sort(pitches,0,count);
+                    frequency=pitches[count/2];
+                }
                 double denominator = count*sxx-sx*sx;
                 if (denominator <= 0) return;
                 slope=(count*sxy-sx*sy)/denominator;

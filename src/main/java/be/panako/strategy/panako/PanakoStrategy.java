@@ -429,7 +429,8 @@ public class PanakoStrategy extends Strategy {
         List<Map.Entry<Integer,List<PanakoMatch>>> candidates = new ArrayList<>(hitsPerIdentifer.entrySet());
         // Score the complete candidate separately. Extra evidence must never
         // discard a strong answer already established by the broad search.
-        for (Map.Entry<Integer,List<PanakoMatch>> candidate : groupHits(verified, printMap).entrySet())
+        Map<Integer,List<PanakoMatch>> verifiedHits = groupHits(verified, printMap);
+        for (Map.Entry<Integer,List<PanakoMatch>> candidate : verifiedHits.entrySet())
             if (candidate.getValue().size() >= minimumUnfilteredHits) candidates.add(candidate);
         candidates.forEach(candidateEntry -> {
             int identifier = candidateEntry.getKey();
@@ -502,9 +503,19 @@ public class PanakoStrategy extends Strategy {
 			         // Every recovery fit passes the same result gates as the legacy
 			         // fit before it can win, so a short burst cannot hide a valid
 			         // fit and the legacy result stands when no recovery fit passes.
-			         for (RobustAlignment.Fit fit : RobustAlignment.fits(q, r, f, robustMinimum, threshold,
-			                 config.getFloat(Key.PANAKO_MIN_TIME_FACTOR), config.getFloat(Key.PANAKO_MAX_TIME_FACTOR),
-			                 config.getFloat(Key.PANAKO_MIN_FREQ_FACTOR), config.getFloat(Key.PANAKO_MAX_FREQ_FACTOR), bands)) {
+			         List<RobustAlignment.Fit> recoveryFits = RobustAlignment.fits(q, r, f, robustMinimum, threshold,
+                         config.getFloat(Key.PANAKO_MIN_TIME_FACTOR), config.getFloat(Key.PANAKO_MAX_TIME_FACTOR),
+                         config.getFloat(Key.PANAKO_MIN_FREQ_FACTOR), config.getFloat(Key.PANAKO_MAX_FREQ_FACTOR), bands);
+                 if (verifiedHits.get(identifier) == hitlist) {
+                     // Keep original-order fits: canonical sampling must never
+                     // erase an answer established before this additional search.
+                     recoveryFits = new ArrayList<>(recoveryFits);
+                     recoveryFits.addAll(RobustAlignment.verifiedFits(q, r, f, robustMinimum, threshold,
+                             config.getFloat(Key.PANAKO_MIN_TIME_FACTOR), config.getFloat(Key.PANAKO_MAX_TIME_FACTOR),
+                             config.getFloat(Key.PANAKO_MIN_FREQ_FACTOR), config.getFloat(Key.PANAKO_MAX_FREQ_FACTOR), bands));
+                     recoveryFits.sort(Comparator.comparingInt((RobustAlignment.Fit fit) -> -fit.count));
+                 }
+                 for (RobustAlignment.Fit fit : recoveryFits) {
 			             Alignment candidate = alignment(hitlist, fit.slope, fit.offset, fit, 1.0f / (1 - fit.slope),
 			                     (float) Math.pow(2, fit.frequencyDelta / bands), threshold, config);
 			             // Fits arrive ranked by aligned hits, which the gate's filtered
