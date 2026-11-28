@@ -503,13 +503,18 @@ public class PanakoStrategy extends Strategy {
 			         // Every recovery fit passes the same result gates as the legacy
 			         // fit before it can win, so a short burst cannot hide a valid
 			         // fit and the legacy result stands when no recovery fit passes.
-			         List<RobustAlignment.Fit> recoveryFits = verifiedHits.get(identifier) == hitlist
-                         ? RobustAlignment.verifiedFits(q, r, f, robustMinimum, threshold,
-                                 config.getFloat(Key.PANAKO_MIN_TIME_FACTOR), config.getFloat(Key.PANAKO_MAX_TIME_FACTOR),
-                                 config.getFloat(Key.PANAKO_MIN_FREQ_FACTOR), config.getFloat(Key.PANAKO_MAX_FREQ_FACTOR), bands)
-                         : RobustAlignment.fits(q, r, f, robustMinimum, threshold,
-			                 config.getFloat(Key.PANAKO_MIN_TIME_FACTOR), config.getFloat(Key.PANAKO_MAX_TIME_FACTOR),
-			                 config.getFloat(Key.PANAKO_MIN_FREQ_FACTOR), config.getFloat(Key.PANAKO_MAX_FREQ_FACTOR), bands);
+			         List<RobustAlignment.Fit> recoveryFits = RobustAlignment.fits(q, r, f, robustMinimum, threshold,
+                         config.getFloat(Key.PANAKO_MIN_TIME_FACTOR), config.getFloat(Key.PANAKO_MAX_TIME_FACTOR),
+                         config.getFloat(Key.PANAKO_MIN_FREQ_FACTOR), config.getFloat(Key.PANAKO_MAX_FREQ_FACTOR), bands);
+                 if (verifiedHits.get(identifier) == hitlist) {
+                     // Keep original-order fits: canonical sampling must never
+                     // erase an answer established before this additional search.
+                     recoveryFits = new ArrayList<>(recoveryFits);
+                     recoveryFits.addAll(RobustAlignment.verifiedFits(q, r, f, robustMinimum, threshold,
+                             config.getFloat(Key.PANAKO_MIN_TIME_FACTOR), config.getFloat(Key.PANAKO_MAX_TIME_FACTOR),
+                             config.getFloat(Key.PANAKO_MIN_FREQ_FACTOR), config.getFloat(Key.PANAKO_MAX_FREQ_FACTOR), bands));
+                     recoveryFits.sort(Comparator.comparingInt((RobustAlignment.Fit fit) -> -fit.count));
+                 }
                  for (RobustAlignment.Fit fit : recoveryFits) {
 			             Alignment candidate = alignment(hitlist, fit.slope, fit.offset, fit, 1.0f / (1 - fit.slope),
 			                     (float) Math.pow(2, fit.frequencyDelta / bands), threshold, config);

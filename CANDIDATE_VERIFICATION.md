@@ -38,12 +38,16 @@ this feature does not promise lower total latency under production load.
 
 ## Stable alignment of sparse candidates
 
-Complete candidates now canonicalize their timing/pitch evidence before the
-bounded consensus search. If the original pair-sampling search finds no fit,
-an additional tempo/offset/pitch vote proposes up to 64 hypotheses for the
+With `PANAKO_ROBUST_ALIGNMENT_MIN_HITS` enabled (at least six; AudioScout uses
+40), complete candidates retain their original-order fits and additionally
+canonicalize their timing/pitch evidence. An extra tempo/offset/pitch vote
+proposes up to 64 hypotheses for the
 unchanged full-resolution refinement and result gates. This recovers sparse
 valid evidence that the fixed random-pair budget could miss depending on SQL
-row order. Broad-search alignment and previously established answers remain.
+row order. Voting centers are seeds only: pitch is re-estimated from the
+inliers before applying its bounds. All fits face the caller's result gates;
+a short burst cannot suppress the vote. Broad-search alignment and previously
+established answers remain.
 
 The extra search applies only to complete shortlisted candidates with at most
 10,000 hit rows, positive timing tolerance and at most 1,024 tempo grid steps.

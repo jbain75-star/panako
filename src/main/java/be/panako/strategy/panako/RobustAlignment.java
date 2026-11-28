@@ -109,10 +109,10 @@ public final class RobustAlignment {
         int[] q=new int[n], r=new int[n], f=new int[n];
         for(int i=0;i<n;i++){int j=order[i];q[i]=query[j];r[i]=reference[j];f[i]=frequencyDelta[j];}
         List<Fit> existing = fits(q,r,f,minimum,tolerance,minTime,maxTime,minFrequency,maxFrequency,bandsPerOctave);
-        if (!existing.isEmpty() || minimum < 6 || n < minimum || n==0 || q[n-1]<=q[0]) return existing;
+        if (minimum < 6 || n < minimum || n==0 || q[n-1]<=q[0]) return existing;
         double lowSlope=1-1/minTime, highSlope=1-1/maxTime;
         if (!Double.isFinite(lowSlope) || !Double.isFinite(highSlope) || highSlope<=lowSlope) return existing;
-        int steps=(int)Math.ceil((highSlope-lowSlope)*(q[n-1]-q[0])/(2*tolerance));
+        int steps=Math.max(2,(int)Math.ceil((highSlope-lowSlope)*(q[n-1]-q[0])/(2*tolerance)));
         if (steps<1 || steps>1024) return existing;
         Search search=new Search(q,r,f,minimum,tolerance,minTime,maxTime,minFrequency,maxFrequency,bandsPerOctave);
         // Highest-support seeds first, with explicit tie ordering. The retained
@@ -143,7 +143,8 @@ public final class RobustAlignment {
             }
         }
         List<double[]> seeds=new ArrayList<>(best);seeds.sort(ranked);
-        for(double[] seed:seeds) search.consider(seed[1],seed[2],seed[3]);
+        for(double[] seed:seeds) search.consider(seed[1],seed[2],seed[3],true);
+        search.fits.addAll(existing);
         search.fits.sort(Comparator.<Fit>comparingInt(a->-a.count).thenComparingDouble(a->a.residual)
                 .thenComparingDouble(a->a.slope).thenComparingDouble(a->a.offset).thenComparingDouble(a->a.frequencyDelta));
         return search.fits;
@@ -167,19 +168,28 @@ public final class RobustAlignment {
                     && pitch > minFrequency && pitch < maxFrequency;
         }
         void consider(double slope, double offset, double frequency) {
+            consider(slope, offset, frequency, false);
+        }
+        void consider(double slope, double offset, double frequency, boolean estimatePitch) {
             if (!allowed(slope, frequency)) return;
             // Refine a coarse hypothesis, then repeatedly trim to the same
             // timing tolerance as the original matcher. No acceptance floor
             // or allowable tempo/pitch range is relaxed.
             for (int pass = 0; pass < 3; pass++) {
                 double sx=0, sy=0, sxx=0, sxy=0; int count=0;
+                int[] pitches=estimatePitch ? new int[q.length] : null;
                 double range = pass == 0 ? tolerance * 2 : tolerance;
                 for (int i = 0; i < q.length; i++) {
                     double y = r[i] - q[i];
                     if (Math.abs(y - slope*q[i] - offset) > range || Math.abs(f[i]-frequency) > 2) continue;
+                    if (estimatePitch) pitches[count]=f[i];
                     double x=q[i]; sx+=x; sy+=y; sxx+=x*x; sxy+=x*y; count++;
                 }
                 if (count < minimum) return;
+                if (estimatePitch) {
+                    Arrays.sort(pitches,0,count);
+                    frequency=pitches[count/2];
+                }
                 double denominator = count*sxx-sx*sx;
                 if (denominator <= 0) return;
                 slope=(count*sxy-sx*sy)/denominator;

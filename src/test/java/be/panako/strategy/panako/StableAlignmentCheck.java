@@ -20,6 +20,7 @@ public final class StableAlignmentCheck {
             for(int i=0;i<64;i++){int q=60+i*54;rows.add(new int[]{q,q+22000+(int)Math.round(slope*q)+(i%3-1),pitch});}
             var first=fit(rows);require(first!=null && first.count>=60,"Lost sparse consensus seed="+seed+" tempo="+tempo);
             require(Math.abs(1/(1-first.slope)-tempo)<.002,"Wrong tempo");
+            require(first.frequencyDelta==pitch,"Reported pitch does not describe the inliers");
             for(int shuffle=0;shuffle<4;shuffle++){
                 Collections.shuffle(rows,random);var next=fit(rows);
                 require(next!=null && next.count==first.count && next.slope==first.slope && next.offset==first.offset && next.frequencyDelta==first.frequencyDelta,"Input order changed answer");checked++;
@@ -35,6 +36,12 @@ public final class StableAlignmentCheck {
         for(double tempo:new double[]{.65,1.6}){
             List<int[]>rows=new ArrayList<>();for(int i=0;i<64;i++){int q=60+i*54;rows.add(new int[]{q,q+22000+(int)Math.round((1-1/tempo)*q),0});}
             require(fit(rows)==null,"Out-of-range tempo accepted");checked++;
+        }
+        for(int pitch:new int[]{-28,23}) {
+            Random random=new Random(11);List<int[]>rows=new ArrayList<>();
+            for(int i=0;i<1600;i++){int q=random.nextInt(3600);rows.add(new int[]{q,random.nextInt(60000),random.nextInt(51)-25});}
+            for(int i=0;i<64;i++){int q=60+i*54;rows.add(new int[]{q,q+22000+(int)Math.round(.03*q)+i%3-1,pitch});}
+            require(fit(rows)==null,"Voting center laundered out-of-range pitch "+pitch);checked++;
         }
         System.out.printf("Stable alignment: %d checks passed in %.2fs%n",checked,(System.nanoTime()-started)/1e9);
     }
