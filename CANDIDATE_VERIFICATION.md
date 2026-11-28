@@ -36,6 +36,25 @@ recover a recording that never enters the shortlist or has no usable reference.
 The original broad-search cap remains in force. Extra work has a bounded cost;
 this feature does not promise lower total latency under production load.
 
+## Stable alignment of sparse candidates
+
+Complete candidates now canonicalize their timing/pitch evidence before the
+bounded consensus search. If the original pair-sampling search finds no fit,
+an additional tempo/offset/pitch vote proposes up to 64 hypotheses for the
+unchanged full-resolution refinement and result gates. This recovers sparse
+valid evidence that the fixed random-pair budget could miss depending on SQL
+row order. Broad-search alignment and previously established answers remain.
+
+The extra search applies only to complete shortlisted candidates with at most
+10,000 hit rows, positive timing tolerance and at most 1,024 tempo grid steps.
+Inputs outside those bounds retain the existing matcher. This is a bounded
+recall improvement, not exhaustive recognition or a guarantee for every mix.
+No fingerprints, score floors, tempo/pitch gates or database layout change.
+
+Build with JDK 11 or later: `./gradlew test shadowJar`. The Gradle suite includes
+synthetic sparse-consensus, input-order, noise and out-of-range checks. Do not
+add private recordings or production fingerprint dumps to the source tree.
+
 ## Validation
 
 - `QueryCleanupCheck` executes the actual matching methods: 486 unchanged

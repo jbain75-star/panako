@@ -145,3 +145,7 @@ Changed by AudioScout, 2026:
   default off): a bounded compact-index read restores truncated evidence for
   up to eight shortlisted recordings. Separate alignment preserves broad-search
   answers and the existing acceptance gates. See `CANDIDATE_VERIFICATION.md`.
+- **Stable sparse-candidate alignment**: canonical timing/pitch order and a
+  bounded tempo/offset vote recover complete candidates missed by random pair
+  sampling. The existing acceptance gates and broad-search path are retained.
+  See `CANDIDATE_VERIFICATION.md` and `ALIGNMENT_LICENSE_REVIEW.md`.

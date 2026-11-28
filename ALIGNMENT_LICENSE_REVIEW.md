@@ -23,3 +23,11 @@ must be synthetic.
 
 References: [AGPL-3.0](https://www.gnu.org/licenses/agpl-3.0.html), sections
 4–6 and 13, and the [GNU FAQ on remote interaction](https://www.gnu.org/licenses/gpl-faq.html#AGPLv3InteractingRemotely).
+
+## 28 November 2026: stable complete-candidate alignment
+
+Reviewed before implementation: the same AGPL-3.0-or-later source and subprocess
+boundary apply. Preserve notices, publish this modification and its synthetic
+checks in the public fork, pin the published tested revision in AudioScout, and
+retain the existing source opportunity and reproducible build instructions.
+No dependency source, production audio, or private fingerprint fixture is added.
